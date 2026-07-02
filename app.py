@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -348,8 +349,87 @@ def repair_mojibake_text(text: str) -> str:
 def clean_text(text: str) -> str:
     """清理通用文本中的空字符、多余空格和过多换行。"""
     text = repair_mojibake_text(text)
+    text = unicodedata.normalize("NFKC", text)
     text = text.replace("\x00", " ")
+    text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
+    text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f]", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def line_signature(line: str) -> str:
+    """生成行文本指纹，用于去掉重复页眉、页脚或连续重复行。"""
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", line).lower()
+
+
+def should_preserve_linebreak(previous: str, current: str, source_type: str) -> bool:
+    """判断两行之间是否应保留换行，避免把标题、列表、表格和 PPT 页码合并进正文。"""
+    if not previous or not current:
+        return True
+    if source_type in {"ppt", "table"}:
+        return True
+    if "|" in previous or "|" in current:
+        return True
+    if re.match(r"^(第\d+页|Page\s+\d+|Slide\s+\d+|备注[:：])", previous, re.IGNORECASE):
+        return True
+    if re.match(r"^(第\d+页|Page\s+\d+|Slide\s+\d+|备注[:：])", current, re.IGNORECASE):
+        return True
+    if re.match(r"^([一二三四五六七八九十]+[、.]|\d+[、.]|\(\d+\)|[A-Za-z]\.)", current):
+        return True
+    if previous.endswith(("。", "！", "？", ".", "!", "?", "；", ";", "：", ":")):
+        return True
+    if len(previous) <= 18 and not previous.endswith(("，", ",")):
+        return True
+    return False
+
+
+def join_extracted_lines(lines: list[str], source_type: str) -> str:
+    """合并 PDF/Word 提取中被硬换行切断的正文行，同时尽量保留结构。"""
+    merged: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            if merged and merged[-1] != "":
+                merged.append("")
+            continue
+        if not merged or merged[-1] == "" or should_preserve_linebreak(merged[-1], line, source_type):
+            merged.append(line)
+            continue
+        separator = "" if re.search(r"[\u4e00-\u9fff]$", merged[-1]) and re.match(r"^[\u4e00-\u9fff]", line) else " "
+        merged[-1] = f"{merged[-1].rstrip('- ')}{separator}{line}"
+    return "\n".join(merged)
+
+
+def post_process_extracted_text(text: str, source_type: str = "document") -> str:
+    """对全文提取结果做结构化清洗：去重复、修断行、保留段落。"""
+    text = clean_text(text)
+    if not text:
+        return ""
+
+    raw_lines = [line.strip() for line in text.splitlines()]
+    signature_counts = Counter(
+        line_signature(line)
+        for line in raw_lines
+        if 2 <= len(line_signature(line)) <= 40
+    )
+    cleaned_lines = []
+    previous_signature = ""
+    for line in raw_lines:
+        signature = line_signature(line)
+        if not line:
+            cleaned_lines.append("")
+            previous_signature = ""
+            continue
+        if signature and signature == previous_signature:
+            continue
+        if source_type == "pdf" and signature_counts.get(signature, 0) >= 3 and len(line) <= 45:
+            continue
+        cleaned_lines.append(line)
+        previous_signature = signature
+
+    text = join_extracted_lines(cleaned_lines, source_type)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -2264,12 +2344,26 @@ def build_wordcloud(freq_df: pd.DataFrame, top_n: int = 40):
     word_col = "词语" if "词语" in freq_df.columns else "word"
     count_col = "频次" if "频次" in freq_df.columns else "count"
     filtered = freq_df.copy()
+    if filtered.empty or word_col not in filtered.columns or count_col not in filtered.columns:
+        figure, axis = plt.subplots(figsize=(11, 5))
+        axis.text(0.5, 0.5, "暂无足够词频生成词云", ha="center", va="center", fontsize=16)
+        axis.axis("off")
+        return figure
     filtered[word_col] = filtered[word_col].astype(str).str.strip()
     filtered = filtered[filtered[word_col].astype(bool)]
     filtered = filtered[~filtered[word_col].isin(STOPWORDS)]
-    filtered = filtered[filtered[count_col] >= 2]
+    filtered[count_col] = pd.to_numeric(filtered[count_col], errors="coerce").fillna(0)
+    filtered = filtered[filtered[count_col] > 0]
+    preferred = filtered[filtered[count_col] >= 2]
+    if not preferred.empty:
+        filtered = preferred
     filtered = filtered.sort_values(count_col, ascending=False).head(top_n)
     frequencies = dict(zip(filtered[word_col], filtered[count_col]))
+    if not frequencies:
+        figure, axis = plt.subplots(figsize=(11, 5))
+        axis.text(0.5, 0.5, "暂无足够词频生成词云", ha="center", va="center", fontsize=16)
+        axis.axis("off")
+        return figure
     font_candidates = [
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/msyh.ttc",
@@ -2320,21 +2414,21 @@ def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard") -> str:
     file_bytes = uploaded_file.getvalue()
 
     if suffix == "pdf":
-        return clean_text(extract_pdf(file_bytes, ocr_mode=ocr_mode))
+        return post_process_extracted_text(extract_pdf(file_bytes, ocr_mode=ocr_mode), "pdf")
     if suffix == "docx":
-        return clean_text(extract_docx(io.BytesIO(file_bytes)))
+        return post_process_extracted_text(extract_docx(io.BytesIO(file_bytes)), "document")
     if suffix == "doc":
-        return clean_text(extract_doc(file_bytes, uploaded_file.name))
+        return post_process_extracted_text(extract_doc(file_bytes, uploaded_file.name), "document")
     if suffix == "pptx":
-        return clean_text(extract_pptx(io.BytesIO(file_bytes)))
+        return post_process_extracted_text(extract_pptx(io.BytesIO(file_bytes)), "ppt")
     if suffix == "ppt":
-        return clean_text(extract_ppt(file_bytes, uploaded_file.name))
+        return post_process_extracted_text(extract_ppt(file_bytes, uploaded_file.name), "ppt")
     if suffix in {"csv", "xlsx", "xls"}:
-        return clean_text(extract_tabular(io.BytesIO(file_bytes), suffix))
+        return post_process_extracted_text(extract_tabular(io.BytesIO(file_bytes), suffix), "table")
     if suffix in {"txt", "md", "json", "jsonl"}:
-        return extract_plain_text(file_bytes)
+        return post_process_extracted_text(extract_plain_text(file_bytes), "document")
     if suffix in {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}:
-        return clean_text(extract_image(io.BytesIO(file_bytes), ocr_mode=ocr_mode))
+        return post_process_extracted_text(extract_image(io.BytesIO(file_bytes), ocr_mode=ocr_mode), "image")
 
     raise ValueError("暂不支持该文件格式")
 
@@ -3290,7 +3384,7 @@ with summary_top[4]:
 with st.container(border=True):
     render_summary(summary_text, result.get("summary_source", "本地摘要"))
 
-detail_tabs = st.tabs(["分类与词频", "全文", "质量检查"])
+detail_tabs = st.tabs(["分类与词频", "全文"])
 with detail_tabs[0]:
     word_top_n = int(st.session_state.get("word_top_n", 30))
     left_box, right_box = st.columns([1, 2])
@@ -3322,9 +3416,6 @@ with detail_tabs[0]:
 with detail_tabs[1]:
     st.subheader("提取的全文")
     st.text_area("全文内容", result["extracted_text"], height=360)
-with detail_tabs[2]:
-    st.subheader("PDCA对抗式摘要质量检查")
-    st.write(result.get("pdca_report", ""))
 
 with st.expander("下载与导出", expanded=False):
     export_format = st.selectbox(
