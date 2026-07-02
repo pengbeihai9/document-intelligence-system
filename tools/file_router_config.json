@@ -1,0 +1,76 @@
+{
+  "file_type_rules": {
+    "pdf": {
+      "extensions": [".pdf"],
+      "label": "PDF文档",
+      "parser": "pdf_text_or_ocr"
+    },
+    "word": {
+      "extensions": [".docx", ".doc"],
+      "label": "Word文档",
+      "parser": "word_text"
+    },
+    "presentation": {
+      "extensions": [".pptx", ".ppt"],
+      "label": "PPT演示文稿",
+      "parser": "presentation_text"
+    },
+    "spreadsheet": {
+      "extensions": [".xlsx", ".xls", ".csv"],
+      "label": "表格/面板数据",
+      "parser": "tabular_data"
+    },
+    "image": {
+      "extensions": [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"],
+      "label": "图片/扫描件",
+      "parser": "image_ocr"
+    },
+    "text": {
+      "extensions": [".txt", ".md", ".json", ".jsonl"],
+      "label": "文本/结构化文本",
+      "parser": "plain_text"
+    }
+  },
+  "task_rules": {
+    "academic_literature": {
+      "label": "论文/研究报告",
+      "keywords": ["abstract", "keywords", "introduction", "methodology", "results", "conclusion", "references", "摘要", "关键词", "引言", "方法", "结果", "结论", "参考文献", "journal", "study", "empirical"],
+      "outputs": ["中文学术摘要", "研究问题提取", "数据与方法归纳", "主要发现与启示", "可引用文献卡片"]
+    },
+    "financial_risk_data": {
+      "label": "财务风险/违约预测",
+      "keywords": ["资产负债率", "流动比率", "ROA", "ROE", "现金流", "违约", "债券", "信用风险", "财务困境", "破产", "ST", "default", "bankruptcy", "financial distress", "credit risk", "leverage"],
+      "outputs": ["风险评分", "高风险样本识别", "关键风险因素", "异常样本提示", "模型输入校验"]
+    },
+    "annual_report_disclosure": {
+      "label": "年报/公告/披露文本",
+      "keywords": ["年度报告", "董事会报告", "管理层讨论", "重大事项", "风险提示", "经营情况", "公司治理", "募集说明书", "评级报告", "10-k", "annual report", "management discussion"],
+      "outputs": ["风险事件识别", "治理与披露摘要", "文本风险标签", "管理层语气线索", "预警信号提取"]
+    },
+    "experiment_results": {
+      "label": "实验结果/模型评估",
+      "keywords": ["accuracy", "auc", "f1", "precision", "recall", "ndcg", "top-k", "ablation", "baseline", "实验结果", "消融", "基准模型", "准确率", "召回率"],
+      "outputs": ["模型指标对比", "消融结论", "论文表格说明", "结果稳健性检查", "改进建议"]
+    },
+    "contract_document": {
+      "label": "合同/协议",
+      "keywords": ["合同", "协议", "甲方", "乙方", "违约责任", "付款", "交付", "保密", "争议解决"],
+      "outputs": ["条款摘要", "风险条款提示", "付款与履约节点", "责任边界识别"]
+    },
+    "resume_profile": {
+      "label": "简历/人才材料",
+      "keywords": ["简历", "教育经历", "工作经历", "项目经验", "技能", "求职", "实习", "毕业院校", "候选人"],
+      "outputs": ["候选人摘要", "技能标签", "项目经历提取", "岗位匹配线索"]
+    },
+    "notice_official": {
+      "label": "通知/公文",
+      "keywords": ["通知", "公告", "会议", "决定", "要求", "单位", "日期", "请于", "安排", "报送"],
+      "outputs": ["事项摘要", "时间地点提取", "责任人/单位", "待办事项"]
+    },
+    "general_document": {
+      "label": "通用文档",
+      "keywords": [],
+      "outputs": ["通用摘要", "关键词提取", "事项归纳", "后续行动建议"]
+    }
+  }
+}

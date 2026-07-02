@@ -1,0 +1,14 @@
+streamlit
+pymupdf
+python-docx
+python-pptx
+pytesseract
+pdf2image
+pillow
+jieba
+pandas
+plotly
+wordcloud
+matplotlib
+requests
+openpyxl

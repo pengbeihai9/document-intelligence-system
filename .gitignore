@@ -1,0 +1,8 @@
+data/
+artifacts/
+experiments/
+backup/
+literature_training_data/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
