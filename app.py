@@ -2800,14 +2800,11 @@ def build_category_explanation(category: str, category_scores: dict[str, int], t
 
 
 def resolve_user_category(auto_category: str) -> str:
-    """根据侧边栏设置决定最终保存分类：自动、标准分类或用户自定义分类。"""
+    """根据侧边栏设置决定最终保存分类：自动分类或标准分类。"""
     mode = st.session_state.get("category_mode", "自动分类")
     if mode == "选择标准分类":
         manual_category = clean_text(str(st.session_state.get("manual_category", "")))
         return manual_category or auto_category
-    if mode == "自定义分类":
-        custom_category = clean_text(str(st.session_state.get("custom_category", "")))
-        return custom_category or auto_category
     return auto_category
 
 
@@ -4026,7 +4023,7 @@ with st.sidebar:
             "日常快速": {
                 "ocr_mode": "standard",
                 "pdf_extract_mode": "auto",
-                "summary_mode": "中文摘要",
+                "summary_mode": "双语摘要",
                 "quality_mode": "快速",
                 "pdca_cycles": 3,
                 "pdca_pass_score": 88,
@@ -4046,7 +4043,7 @@ with st.sidebar:
             "扫描件识别": {
                 "ocr_mode": "accurate",
                 "pdf_extract_mode": "vision",
-                "summary_mode": "中文摘要",
+                "summary_mode": "双语摘要",
                 "quality_mode": "快速",
                 "pdca_cycles": 3,
                 "pdca_pass_score": 85,
@@ -4085,15 +4082,9 @@ with st.sidebar:
             )
             preset["pdf_extract_mode"] = {"自动推荐": "auto", "快速文本": "text", "多模态精读": "vision"}[pdf_extract_label]
 
-            summary_options = ["中文摘要", "英文摘要", "双语摘要"]
-            summary_mode = st.radio(
-                "摘要语言",
-                summary_options,
-                index=summary_options.index(preset["summary_mode"]),
-                horizontal=True,
-                help="给中文材料通常选中文摘要；论文展示可选双语摘要。",
-            )
-            preset["summary_mode"] = summary_mode
+            # 摘要语言不再交给用户选择，统一同时生成中文摘要和 English Summary。
+            preset["summary_mode"] = "双语摘要"
+            st.caption("摘要输出：中文摘要 + English Summary")
 
             quality_mode = st.radio(
                 "摘要质量",
@@ -4144,25 +4135,20 @@ with st.sidebar:
 
         category_mode = st.radio(
             "文档分类方式",
-            ["自动分类", "选择标准分类", "自定义分类"],
+            ["自动分类", "选择标准分类"],
             index=0,
             help="自动分类会根据文档内容判断；手动分类会保存到历史记录，便于后续筛选。",
         )
         st.session_state.category_mode = category_mode
         if category_mode == "选择标准分类":
             st.session_state.manual_category = st.selectbox("标准分类", STANDARD_CATEGORIES)
-            st.session_state.custom_category = ""
-        elif category_mode == "自定义分类":
-            st.session_state.custom_category = st.text_input("新建分类名称", placeholder="例如：课程材料、企业案例、导师资料")
-            st.session_state.manual_category = ""
         else:
             st.session_state.manual_category = ""
-            st.session_state.custom_category = ""
         word_top_n = st.slider("词频显示数量", min_value=10, max_value=60, value=30, step=5)
         st.session_state.word_top_n = word_top_n
         st.caption(
             f"当前：{preset_label}｜"
-            f"{'双语' if preset['summary_mode'] == '双语摘要' else preset['summary_mode']}｜"
+            "中英文摘要｜"
             f"{preset['quality_mode']}｜复核{preset['pdca_cycles']}轮"
         )
 
@@ -4255,8 +4241,7 @@ if uploaded_file is not None:
         f"{st.session_state.get('pdca_cycles', 3)}:"
         f"{st.session_state.get('pdca_pass_score', 88)}:"
         f"{st.session_state.get('category_mode', '自动分类')}:"
-        f"{st.session_state.get('manual_category', '')}:"
-        f"{st.session_state.get('custom_category', '')}"
+        f"{st.session_state.get('manual_category', '')}"
     )
 else:
     upload_signature = None
