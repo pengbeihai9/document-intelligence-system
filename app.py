@@ -13,6 +13,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+import base64
 
 import fitz
 import jieba
@@ -693,22 +694,101 @@ def run_windows_ocr(image: Image.Image, mode: str = "standard") -> str:
                 pass
 
 
-def render_pdf_pages_with_fitz(file_bytes: bytes, mode: str = "standard") -> list[Image.Image]:
+def render_pdf_pages_with_fitz(file_bytes: bytes, mode: str = "standard", max_pages: int | None = None) -> list[Image.Image]:
     """用 PyMuPDF 将 PDF 页面渲染成图片，作为 Poppler 失败时的兜底方案。"""
     images = []
     zoom = {"fast": 1.4, "standard": 1.7, "accurate": 2.2}.get(mode, 1.7)
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    for page in doc:
+    page_count = len(doc) if max_pages is None else min(len(doc), max_pages)
+    for page_index in range(page_count):
+        page = doc[page_index]
         pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         images.append(Image.open(io.BytesIO(pixmap.tobytes("png"))))
     return images
 
 
-def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard") -> str:
-    """提取 PDF 文本；若 PDF 没有可提取文字，则按 OCR 模式转图片识别。"""
+def image_to_data_url(image: Image.Image, max_width: int = 1400) -> str:
+    """把页面截图压缩为 data URL，供 OpenAI 兼容多模态接口使用。"""
+    image = image.convert("RGB")
+    if image.width > max_width:
+        ratio = max_width / image.width
+        image = image.resize((max_width, max(1, int(image.height * ratio))), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=82, optimize=True)
+    payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{payload}"
+
+
+def pdf_text_needs_vision(text: str) -> bool:
+    """判断 PDF 本地文本是否明显不足，需要尝试多模态页面读取。"""
+    cleaned = clean_text(text)
+    compact = re.sub(r"\s+", "", cleaned)
+    if len(compact) < 220:
+        return True
+    if is_unreadable_text(cleaned):
+        return True
+    short_lines = [line for line in cleaned.splitlines() if 1 <= len(line.strip()) <= 8]
+    lines = [line for line in cleaned.splitlines() if line.strip()]
+    return bool(lines) and len(short_lines) / max(len(lines), 1) > 0.55
+
+
+def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "") -> str:
+    """调用多模态模型从 PDF 页面截图中提取正文和表格要点。"""
+    api_key, api_base, model = get_vision_llm_config()
+    if not api_key:
+        raise RuntimeError("未配置视觉模型 API。")
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "请从这些PDF页面截图中提取可读正文。要求：\n"
+                "1. 按页面顺序输出，保留标题、段落、列表和表格关键信息。\n"
+                "2. 不要总结，不要改写，不要补充原图没有的信息。\n"
+                "3. 识别不清的地方写[无法识别]，不要猜测。\n"
+                f"文件名：{filename or '未命名PDF'}"
+            ),
+        }
+    ]
+    for index, image in enumerate(images, start=1):
+        content.append({"type": "text", "text": f"第{index}页："})
+        content.append({"type": "image_url", "image_url": {"url": image_to_data_url(image)}})
+    response = requests.post(
+        f"{api_base}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你是严谨的PDF页面文字提取助手，只做OCR和结构化转写。"},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "max_tokens": 2200,
+            "stream": True,
+        },
+        stream=True,
+        timeout=90,
+    )
+    response.raise_for_status()
+    return clean_text(parse_llm_response(response))
+
+
+def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard", pdf_extract_mode: str = "auto", filename: str = "") -> str:
+    """提取 PDF 文本；必要时用 OCR 或多模态页面读取兜底。"""
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     pages_text = [page.get_text("text") for page in doc]
     text = clean_text("\n".join(pages_text))
+
+    use_vision = pdf_extract_mode == "vision" or (pdf_extract_mode == "auto" and pdf_text_needs_vision(text))
+    if use_vision:
+        try:
+            max_pages = int(get_secret("VISION_PDF_MAX_PAGES") or 6)
+            images = render_pdf_pages_with_fitz(file_bytes, mode="standard", max_pages=max_pages)
+            vision_text = call_vision_pdf_extraction(images, filename=filename)
+            if len(clean_text(vision_text)) >= max(160, len(text) * 0.6):
+                return vision_text
+        except Exception:
+            if pdf_extract_mode == "vision":
+                raise
 
     if len(text) >= 80:
         return text
@@ -1217,6 +1297,14 @@ def get_llm_config() -> tuple[str | None, str, list[str]]:
         if item and item not in models:
             models.append(item)
     return api_key, api_base.rstrip("/"), models
+
+
+def get_vision_llm_config() -> tuple[str | None, str, str]:
+    """读取 PDF 多模态提取使用的视觉模型配置；未单独配置时复用摘要模型。"""
+    api_key = get_secret("VISION_API_KEY") or get_secret("LLM_API_KEY")
+    api_base = get_secret("VISION_API_BASE") or get_secret("LLM_API_BASE") or "https://api.openai.com/v1"
+    model = get_secret("VISION_MODEL") or get_secret("LLM_MODEL") or "gpt-5.4-mini"
+    return api_key, api_base.rstrip("/"), model
 
 
 @st.cache_resource(show_spinner=False)
@@ -2408,13 +2496,16 @@ def figure_to_png_bytes(figure) -> bytes:
     return buffer.getvalue()
 
 
-def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard") -> str:
+def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard", pdf_extract_mode: str = "auto") -> str:
     """按文件后缀选择 PDF、Word、PPT、表格、文本或图片解析方式。"""
     suffix = uploaded_file.name.lower().rsplit(".", 1)[-1]
     file_bytes = uploaded_file.getvalue()
 
     if suffix == "pdf":
-        return post_process_extracted_text(extract_pdf(file_bytes, ocr_mode=ocr_mode), "pdf")
+        return post_process_extracted_text(
+            extract_pdf(file_bytes, ocr_mode=ocr_mode, pdf_extract_mode=pdf_extract_mode, filename=uploaded_file.name),
+            "pdf",
+        )
     if suffix == "docx":
         return post_process_extracted_text(extract_docx(io.BytesIO(file_bytes)), "document")
     if suffix == "doc":
@@ -2902,17 +2993,17 @@ st.markdown(
         color: #111827 !important;
     }
     div[data-testid="stFileUploaderDropzone"] {
-        background: #ffffff !important;
+        background: #fbfcfe !important;
         color: #111827 !important;
-        border: 1.5px dashed #3b82f6 !important;
-        border-radius: 10px !important;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+        border: 1px dashed #cbd5e1 !important;
+        border-radius: 8px !important;
+        box-shadow: none;
         transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     }
     div[data-testid="stFileUploaderDropzone"]:hover {
-        background: #eff6ff !important;
-        border-color: #2563eb !important;
-        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+        background: #f8fafc !important;
+        border-color: #94a3b8 !important;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
     }
     div[data-testid="stFileUploaderDropzone"] * {
         color: #111827 !important;
@@ -3090,6 +3181,7 @@ with st.sidebar:
         preset_defaults = {
             "日常快速": {
                 "ocr_mode": "standard",
+                "pdf_extract_mode": "auto",
                 "summary_mode": "中文摘要",
                 "quality_mode": "快速",
                 "pdca_cycles": 1,
@@ -3099,6 +3191,7 @@ with st.sidebar:
             },
             "论文精修": {
                 "ocr_mode": "standard",
+                "pdf_extract_mode": "auto",
                 "summary_mode": "双语摘要",
                 "quality_mode": "精修",
                 "pdca_cycles": 3,
@@ -3108,6 +3201,7 @@ with st.sidebar:
             },
             "扫描件识别": {
                 "ocr_mode": "accurate",
+                "pdf_extract_mode": "vision",
                 "summary_mode": "中文摘要",
                 "quality_mode": "快速",
                 "pdca_cycles": 1,
@@ -3135,6 +3229,17 @@ with st.sidebar:
                 help="普通文字 PDF 不受影响。扫描件不清楚时选高精度。",
             )
             preset["ocr_mode"] = {"快速": "fast", "标准": "standard", "高精度": "accurate"}[ocr_mode_label]
+
+            pdf_extract_options = ["自动推荐", "快速文本", "多模态精读"]
+            pdf_extract_default = {"auto": 0, "text": 1, "vision": 2}[preset["pdf_extract_mode"]]
+            pdf_extract_label = st.radio(
+                "PDF提取方式",
+                pdf_extract_options,
+                index=pdf_extract_default,
+                horizontal=True,
+                help="自动推荐会先用快速文本提取，质量差时再尝试多模态精读。",
+            )
+            preset["pdf_extract_mode"] = {"自动推荐": "auto", "快速文本": "text", "多模态精读": "vision"}[pdf_extract_label]
 
             summary_options = ["中文摘要", "英文摘要", "双语摘要"]
             summary_mode = st.radio(
@@ -3185,6 +3290,7 @@ with st.sidebar:
                 step=10,
             )
         st.session_state.ocr_mode = preset["ocr_mode"]
+        st.session_state.pdf_extract_mode = preset["pdf_extract_mode"]
         st.session_state.summary_mode = preset["summary_mode"]
         st.session_state.quality_mode = preset["quality_mode"]
         st.session_state.pdca_cycles = int(preset["pdca_cycles"])
@@ -3264,10 +3370,11 @@ with st.sidebar:
                 st.rerun()
 
 uploaded_file = st.file_uploader(
-    "上传文档并开始处理",
+    "上传文档",
     type=["pdf", "doc", "docx", "ppt", "pptx", "csv", "xlsx", "xls", "txt", "md", "json", "jsonl", "png", "jpg", "jpeg", "bmp", "tif", "tiff"],
     key=st.session_state.upload_key,
 )
+st.caption("选择文件后会自动开始处理。支持 PDF、Word、PPT、表格、文本和常见图片格式。")
 
 upload_actions = st.columns([1, 1, 2])
 with upload_actions[0]:
@@ -3301,6 +3408,7 @@ if uploaded_file is not None:
     upload_signature = (
         f"{st.session_state.upload_key}:{uploaded_file.name}:{uploaded_file.size}:"
         f"{st.session_state.get('ocr_mode', 'standard')}:"
+        f"{st.session_state.get('pdf_extract_mode', 'auto')}:"
         f"{st.session_state.get('summary_mode', '中文摘要')}:"
         f"{st.session_state.get('quality_mode', '快速')}:"
         f"{st.session_state.get('pdca_cycles', 3)}:"
@@ -3332,7 +3440,11 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
         with st.spinner("正在处理文件，请稍候..."):
             # 解析阶段会根据文件类型自动选择 PDF、Word、PPT、表格文本提取或 OCR。
             update_progress(progress_bar, status_box, 18, "正在提取文本/OCR 识别", eta_hint)
-            extracted_text = parse_uploaded_file(uploaded_file, ocr_mode=st.session_state.get("ocr_mode", "standard"))
+            extracted_text = parse_uploaded_file(
+                uploaded_file,
+                ocr_mode=st.session_state.get("ocr_mode", "standard"),
+                pdf_extract_mode=st.session_state.get("pdf_extract_mode", "auto"),
+            )
             update_progress(progress_bar, status_box, 45, "文本提取完成，正在检查文本质量", eta_hint)
     except Exception as exc:
         progress_bar.progress(100)
