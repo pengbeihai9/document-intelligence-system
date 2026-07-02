@@ -386,6 +386,33 @@ def clean_text(text: str) -> str:
     """清理通用文本中的空字符、多余空格和过多换行。"""
     text = repair_mojibake_text(text)
     text = unicodedata.normalize("NFKC", text)
+    formula_replacements = {
+        "≤": "<=",
+        "≥": ">=",
+        "≠": "!=",
+        "×": r"\times ",
+        "÷": r"\div ",
+        "∑": r"\sum ",
+        "∏": r"\prod ",
+        "√": r"\sqrt ",
+        "∞": r"\infty ",
+        "≈": r"\approx ",
+        "→": r"\to ",
+        "←": r"\leftarrow ",
+        "∈": r"\in ",
+        "∂": r"\partial ",
+        "α": r"\alpha ",
+        "β": r"\beta ",
+        "γ": r"\gamma ",
+        "δ": r"\delta ",
+        "λ": r"\lambda ",
+        "μ": r"\mu ",
+        "σ": r"\sigma ",
+        "θ": r"\theta ",
+        "ρ": r"\rho ",
+    }
+    for source, target in formula_replacements.items():
+        text = text.replace(source, target)
     text = text.replace("\x00", " ")
     text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
     text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f]", " ", text)
@@ -393,6 +420,21 @@ def clean_text(text: str) -> str:
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def looks_like_formula_line(line: str) -> bool:
+    """识别公式或数学表达式行，避免清洗和断行合并时破坏结构。"""
+    stripped = line.strip()
+    if len(stripped) < 3:
+        return False
+    formula_marks = r"=+\-*/^_{}\\∑∏√∞≈≤≥≠<>∂∫αβγδλμσθρ"
+    mark_count = len(re.findall(f"[{re.escape(formula_marks)}]", stripped))
+    latin_math = len(re.findall(r"\b[A-Za-z]\w*\b", stripped))
+    if "$" in stripped or r"\frac" in stripped or r"\sum" in stripped or r"\int" in stripped:
+        return True
+    if "=" in stripped and mark_count >= 2:
+        return True
+    return mark_count >= 4 and latin_math >= 1
 
 
 def line_signature(line: str) -> str:
@@ -403,6 +445,8 @@ def line_signature(line: str) -> str:
 def should_preserve_linebreak(previous: str, current: str, source_type: str) -> bool:
     """判断两行之间是否应保留换行，避免把标题、列表、表格和 PPT 页码合并进正文。"""
     if not previous or not current:
+        return True
+    if looks_like_formula_line(previous) or looks_like_formula_line(current):
         return True
     if source_type in {"ppt", "table"}:
         return True
@@ -660,6 +704,9 @@ def run_ocr(image: Image.Image, mode: str = "standard") -> str:
         configs = ["--oem 1 --psm 6 -c preserve_interword_spaces=1"]
         if mode != "fast":
             configs.append("--oem 1 --psm 3 -c preserve_interword_spaces=1")
+            configs.append("--oem 1 --psm 11 -c preserve_interword_spaces=1")
+        if mode == "accurate":
+            configs.append("--oem 1 --psm 12 -c preserve_interword_spaces=1")
         for variant in ocr_image_variants(image, mode=mode):
             for config in configs:
                 text = clean_ocr_text(pytesseract.image_to_string(variant, lang="chi_sim+eng", config=config))
@@ -809,6 +856,9 @@ def pdf_text_needs_vision(text: str) -> bool:
         return True
     if is_unreadable_text(cleaned):
         return True
+    formula_lines = [line for line in cleaned.splitlines() if looks_like_formula_line(line)]
+    if formula_lines and len(formula_lines) / max(len([line for line in cleaned.splitlines() if line.strip()]), 1) > 0.18:
+        return True
     short_lines = [line for line in cleaned.splitlines() if 1 <= len(line.strip()) <= 8]
     lines = [line for line in cleaned.splitlines() if line.strip()]
     return bool(lines) and len(short_lines) / max(len(lines), 1) > 0.55
@@ -826,7 +876,9 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "", pa
                 "请从这些PDF页面截图中提取可读正文。要求：\n"
                 "1. 按页面顺序输出，保留标题、段落、列表和表格关键信息。\n"
                 "2. 不要总结，不要改写，不要补充原图没有的信息。\n"
-                "3. 识别不清的地方写[无法识别]，不要猜测。\n"
+                "3. 对数学公式、计量模型、约束条件和变量定义，尽量用 LaTeX 原样转写，例如 y_{i,t}=\\alpha+\\beta x_{i,t}+\\epsilon_{i,t}。\n"
+                "4. 公式单独成行，变量下标、上标、求和、分式、希腊字母和比较符号尽量保留；不要把公式改写成文字解释。\n"
+                "5. 识别不清的地方写[无法识别]，不要猜测。\n"
                 f"文件名：{filename or '未命名PDF'}"
             ),
         }
@@ -842,7 +894,7 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "", pa
         json={
             "model": model,
             "messages": [
-                {"role": "system", "content": "你是严谨的PDF页面文字提取助手，只做OCR和结构化转写。"},
+                {"role": "system", "content": "你是严谨的PDF页面文字提取助手，只做OCR、公式转写和结构化转写，不做摘要。"},
                 {"role": "user", "content": content},
             ],
             "temperature": 0,
@@ -2844,9 +2896,12 @@ def extracted_text_quality(text: str) -> tuple[str, str, list[str]]:
 
     issues = []
     score = 100
+    formula_line_count = sum(1 for line in lines if looks_like_formula_line(line))
     if is_unreadable_text(cleaned) or noise_ratio > 0.04:
         score -= 45
         issues.append("疑似存在乱码或字体编码问题，建议重新导出 PDF，或上传原始 Word。")
+    if formula_line_count:
+        issues.append(f"检测到 {formula_line_count} 行疑似公式或数学表达式；系统会尽量保留公式结构，复杂公式建议使用“多模态精读”或高精度 OCR 后人工复核。")
     if short_ratio > 0.45 and len(lines) >= 8:
         score -= 25
         issues.append("短行比例偏高，可能是扫描件、分栏 PDF 或逐字断行，建议尝试“多模态精读”或“扫描件识别”。")
