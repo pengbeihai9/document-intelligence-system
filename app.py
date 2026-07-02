@@ -2904,10 +2904,25 @@ st.markdown(
     div[data-testid="stFileUploaderDropzone"] {
         background: #ffffff !important;
         color: #111827 !important;
-        border-color: #d1d5db !important;
+        border: 1.5px dashed #3b82f6 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+        transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    div[data-testid="stFileUploaderDropzone"]:hover {
+        background: #eff6ff !important;
+        border-color: #2563eb !important;
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
     }
     div[data-testid="stFileUploaderDropzone"] * {
         color: #111827 !important;
+    }
+    div[data-testid="stFileUploaderDropzone"] small,
+    div[data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p {
+        color: #4b5563 !important;
+    }
+    div[data-testid="stFileUploader"] section {
+        background: transparent !important;
     }
     [data-baseweb="select"] *, [data-baseweb="radio"] *, [data-baseweb="slider"] * {
         color: #111827 !important;
@@ -3065,35 +3080,117 @@ with st.sidebar:
         st.session_state.last_result = None
         st.rerun()
 
-    with st.expander("高级设置", expanded=False):
-        st.subheader("识别设置")
-        ocr_mode_label = st.radio(
-            "图片/扫描 PDF 识别模式",
-            ["快速", "标准", "高精度"],
-            index=1,
-            horizontal=True,
-            help="仅影响图片和扫描版 PDF。快速模式更快，高精度模式更适合模糊扫描件。",
-        )
-        st.session_state.ocr_mode = {"快速": "fast", "标准": "standard", "高精度": "accurate"}[ocr_mode_label]
-        st.caption("普通文字 PDF 会直接提取文本，不受该设置影响。")
-
-        summary_mode = st.radio(
-            "摘要输出语言",
-            ["中文摘要", "英文摘要", "双语摘要"],
+    with st.expander("处理模式", expanded=True):
+        preset_label = st.radio(
+            "我想要",
+            ["日常快速", "论文精修", "扫描件识别"],
             index=0,
-            horizontal=True,
-            help="影响大模型摘要输出语言；无 API 时本地兜底主要提供中文摘要。",
+            help="普通用户优先选这里即可；只有需要更细控制时再展开手动微调。",
         )
-        st.session_state.summary_mode = summary_mode
+        preset_defaults = {
+            "日常快速": {
+                "ocr_mode": "standard",
+                "summary_mode": "中文摘要",
+                "quality_mode": "快速",
+                "pdca_cycles": 1,
+                "pdca_pass_score": 88,
+                "cn_target": 320,
+                "en_target": 180,
+            },
+            "论文精修": {
+                "ocr_mode": "standard",
+                "summary_mode": "双语摘要",
+                "quality_mode": "精修",
+                "pdca_cycles": 3,
+                "pdca_pass_score": 90,
+                "cn_target": 360,
+                "en_target": 220,
+            },
+            "扫描件识别": {
+                "ocr_mode": "accurate",
+                "summary_mode": "中文摘要",
+                "quality_mode": "快速",
+                "pdca_cycles": 1,
+                "pdca_pass_score": 85,
+                "cn_target": 280,
+                "en_target": 160,
+            },
+        }
+        preset = preset_defaults[preset_label]
+        preset_tips = {
+            "日常快速": "适合普通 Word/PDF，速度优先，摘要质量够日常查看。",
+            "论文精修": "适合论文、项目材料和给老师看的摘要，会更慢但摘要更正式。",
+            "扫描件识别": "适合图片或扫描版 PDF，会加强 OCR 识别，处理时间更长。",
+        }
+        st.caption(preset_tips[preset_label])
 
-        quality_mode = st.radio(
-            "处理速度",
-            ["快速", "精修"],
-            index=0,
-            horizontal=True,
-            help="快速模式减少大模型复核次数；精修模式会额外执行顶刊/顶会风格终审，质量更高但更慢。",
-        )
-        st.session_state.quality_mode = quality_mode
+        with st.expander("手动微调", expanded=False):
+            ocr_options = ["快速", "标准", "高精度"]
+            ocr_default = {"fast": 0, "standard": 1, "accurate": 2}[preset["ocr_mode"]]
+            ocr_mode_label = st.radio(
+                "图片/扫描 PDF 识别",
+                ocr_options,
+                index=ocr_default,
+                horizontal=True,
+                help="普通文字 PDF 不受影响。扫描件不清楚时选高精度。",
+            )
+            preset["ocr_mode"] = {"快速": "fast", "标准": "standard", "高精度": "accurate"}[ocr_mode_label]
+
+            summary_options = ["中文摘要", "英文摘要", "双语摘要"]
+            summary_mode = st.radio(
+                "摘要语言",
+                summary_options,
+                index=summary_options.index(preset["summary_mode"]),
+                horizontal=True,
+                help="给中文材料通常选中文摘要；论文展示可选双语摘要。",
+            )
+            preset["summary_mode"] = summary_mode
+
+            quality_mode = st.radio(
+                "摘要质量",
+                ["快速", "精修"],
+                index=0 if preset["quality_mode"] == "快速" else 1,
+                horizontal=True,
+                help="精修会额外复核和润色，质量更高但更慢。",
+            )
+            preset["quality_mode"] = quality_mode
+
+            preset["pdca_cycles"] = st.slider(
+                "质量复核轮次",
+                min_value=1,
+                max_value=5,
+                value=int(preset["pdca_cycles"]),
+                help="轮次越多越慢；日常使用 1 轮即可。",
+            )
+            preset["pdca_pass_score"] = st.slider(
+                "复核通过分数",
+                min_value=70,
+                max_value=95,
+                value=int(preset["pdca_pass_score"]),
+                step=1,
+                help="越高越严格，也越容易触发修订。",
+            )
+            preset["cn_target"] = st.slider(
+                "中文摘要字数",
+                min_value=120,
+                max_value=800,
+                value=int(preset["cn_target"]),
+                step=20,
+            )
+            preset["en_target"] = st.slider(
+                "英文摘要词数",
+                min_value=80,
+                max_value=500,
+                value=int(preset["en_target"]),
+                step=10,
+            )
+        st.session_state.ocr_mode = preset["ocr_mode"]
+        st.session_state.summary_mode = preset["summary_mode"]
+        st.session_state.quality_mode = preset["quality_mode"]
+        st.session_state.pdca_cycles = int(preset["pdca_cycles"])
+        st.session_state.pdca_pass_score = int(preset["pdca_pass_score"])
+        st.session_state.cn_summary_target = int(preset["cn_target"])
+        st.session_state.en_summary_target = int(preset["en_target"])
 
         category_mode = st.radio(
             "文档分类方式",
@@ -3111,52 +3208,13 @@ with st.sidebar:
         else:
             st.session_state.manual_category = ""
             st.session_state.custom_category = ""
-
-        pdca_cycles = st.slider(
-            "质量复核轮次",
-            min_value=1,
-            max_value=5,
-            value=1 if quality_mode == "快速" else 3,
-            help="轮次越多，摘要会被复核和修订更多次，但等待时间也会增加。",
-        )
-        pdca_pass_score = st.slider(
-            "复核通过分数",
-            min_value=70,
-            max_value=95,
-            value=88,
-            step=1,
-            help="分数由忠实性、完整性、结构匹配和表达质量综合判断。",
-        )
-        cn_summary_target = st.slider(
-            "中文摘要字数",
-            min_value=120,
-            max_value=800,
-            value=320 if summary_mode == "中文摘要" else 260,
-            step=20,
-            help="用于控制中文摘要长度，双语摘要时同样生效。",
-        )
-        en_summary_target = st.slider(
-            "英文摘要词数",
-            min_value=80,
-            max_value=500,
-            value=180 if summary_mode == "英文摘要" else 220,
-            step=10,
-            help="用于控制英文摘要长度，双语摘要时同样生效。",
-        )
-        word_top_n = st.slider(
-            "词频显示数量",
-            min_value=10,
-            max_value=60,
-            value=30,
-            step=5,
-            help="控制词云和词频柱状图显示多少个高频词。",
-        )
-        st.session_state.pdca_cycles = pdca_cycles
-        st.session_state.pdca_pass_score = pdca_pass_score
-        st.session_state.cn_summary_target = cn_summary_target
-        st.session_state.en_summary_target = en_summary_target
+        word_top_n = st.slider("词频显示数量", min_value=10, max_value=60, value=30, step=5)
         st.session_state.word_top_n = word_top_n
-        st.caption("复核分数依据：忠实性40分、完整性25分、结构与任务匹配20分、表达质量15分。")
+        st.caption(
+            f"当前：{preset_label}｜"
+            f"{'双语' if preset['summary_mode'] == '双语摘要' else preset['summary_mode']}｜"
+            f"{preset['quality_mode']}｜复核{preset['pdca_cycles']}轮"
+        )
 
     st.divider()
     st.subheader("我的文档")
