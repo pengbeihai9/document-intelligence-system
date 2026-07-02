@@ -2568,20 +2568,26 @@ def build_wordcloud(freq_df: pd.DataFrame, top_n: int = 40):
             font_path=resolve_cjk_font_path(),
             width=1100,
             height=520,
-            background_color="white",
-            max_words=top_n,
-            prefer_horizontal=0.95,
+            background_color="#fbfcfe",
+            colormap="cividis",
+            max_words=min(top_n, 45),
+            prefer_horizontal=1.0,
             collocations=False,
-            margin=4,
+            margin=10,
+            min_font_size=10,
+            max_font_size=92,
+            relative_scaling=0.45,
+            contour_width=1,
+            contour_color="#e5e7eb",
             random_state=42,
         ).generate_from_frequencies(frequencies)
     except Exception as exc:
         return build_notice_figure(f"词云生成失败，已保留词频柱状图\n{str(exc)[:90]}")
 
-    figure, axis = plt.subplots(figsize=(11, 5))
+    figure, axis = plt.subplots(figsize=(11, 5), facecolor="#fbfcfe")
     axis.imshow(wordcloud, interpolation="bilinear")
     axis.axis("off")
-    figure.tight_layout(pad=0.2)
+    figure.tight_layout(pad=0.4)
     return figure
 
 
@@ -3257,7 +3263,7 @@ with st.spinner("加载中，请稍候..."):
         st.session_state.upload_error = None
 
 st.title("文档智能处理系统")
-st.caption("上传文档后自动完成文本提取、摘要、分类、词频统计与下载。")
+st.caption("一个支持多用户、文档解析、OCR、摘要生成、词频可视化和自动分类的在线文档处理小工具。")
 
 st.markdown(
     """
@@ -3424,6 +3430,18 @@ st.markdown(
         font-weight: 600;
         line-height: 1.2;
     }
+    .entry-note {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+        margin: 0.55rem 0 1rem 0;
+        color: #374151;
+        line-height: 1.65;
+    }
+    .entry-note strong {
+        color: #111827;
+    }
     div[data-testid="stTabs"] button {
         border-radius: 8px;
     }
@@ -3461,15 +3479,19 @@ st.markdown(
     <div class="feature-strip">
       <div class="feature-chip">
         <div class="label">支持</div>
-        <div class="value">PDF / Word / PPT / 图片</div>
+        <div class="value">PDF / Word / 扫描件OCR</div>
       </div>
       <div class="feature-chip">
         <div class="label">输出</div>
-        <div class="value">摘要 / 分类 / 词频</div>
+        <div class="value">摘要 / 分类 / 词云词频</div>
       </div>
       <div class="feature-chip">
         <div class="label">历史</div>
         <div class="value">当前账号隔离保存</div>
+      </div>
+      <div class="feature-chip">
+        <div class="label">部署</div>
+        <div class="value">公网链接可访问</div>
       </div>
     </div>
     """,
@@ -3478,13 +3500,21 @@ st.markdown(
 
 # 未登录时只显示登录和注册表单；登录成功后再进入主功能页面。
 if st.session_state.user is None:
-    st.info("老师或评阅者可直接点击“免注册试用”进入系统；也可以自行注册账号保存个人历史记录。")
-    if st.button("免注册试用", width="stretch"):
+    st.markdown(
+        """
+        <div class="entry-note">
+            <strong>评阅入口：</strong>可直接点击“免注册试用”进入系统，上传示例文件检查解析、OCR、摘要、词频图和分类结果。
+            也可以注册新账号；不同账号的上传记录互相隔离，只能看到自己的文件。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("免注册试用，直接进入系统", width="stretch"):
         st.session_state.user = get_or_create_demo_user()
         st.session_state.last_result = None
         st.rerun()
 
-    login_tab, register_tab = st.tabs(["登录", "注册"])
+    login_tab, register_tab = st.tabs(["已有账号登录", "新用户注册"])
 
     with login_tab:
         with st.form("login_form"):
@@ -3736,12 +3766,12 @@ with st.sidebar:
                 st.rerun()
 
 uploaded_file = st.file_uploader(
-    "上传文档",
+    "上传文档并开始处理",
     type=["pdf", "doc", "docx", "ppt", "pptx", "csv", "xlsx", "xls", "txt", "md", "json", "jsonl", "png", "jpg", "jpeg", "bmp", "tif", "tiff"],
     key=st.session_state.upload_key,
 )
 st.markdown(
-    '<div class="upload-hint">单个文件最大 200MB；支持 PDF、Word、PPT、表格、文本和常见图片格式。选择文件后会自动开始处理。</div>',
+    '<div class="upload-hint">单个文件最大 200MB；支持 PDF、Word、扫描版 PDF、图片、PPT、表格和文本。选择文件后会自动提取文本、生成摘要、分类并统计词频。</div>',
     unsafe_allow_html=True,
 )
 
@@ -3951,17 +3981,17 @@ with detail_tabs[1]:
 with st.expander("下载与导出", expanded=False):
     st.caption("推荐优先下载 Word 或 PDF；TXT 适合复制，CSV 和图表适合二次分析。")
     primary_exports = [
-        ("Word", "下载 Word 报告"),
-        ("PDF", "下载论文式 PDF"),
-        ("Markdown", "下载 Markdown"),
-        ("摘要TXT", "只下载摘要"),
+        ("Word", "下载完整分析报告（Word，可编辑）"),
+        ("PDF", "下载完整分析报告（论文式PDF）"),
+        ("Markdown", "下载完整分析报告（Markdown文本）"),
+        ("摘要TXT", "下载摘要正文（TXT）"),
     ]
     data_exports = [
-        ("TXT", "下载原文 TXT"),
-        ("词频CSV", "下载词频表"),
-        ("分类得分CSV", "下载分类得分"),
-        ("词云PNG", "下载词云图"),
-        ("词频柱状图HTML", "下载柱状图"),
+        ("TXT", "下载提取全文（TXT）"),
+        ("词频CSV", "下载高频词统计表（CSV）"),
+        ("分类得分CSV", "下载分类得分表（CSV）"),
+        ("词云PNG", "下载高频词词云图（PNG）"),
+        ("词频柱状图HTML", "下载高频词柱状图（HTML）"),
     ]
     for export_row in (primary_exports, data_exports):
         columns = st.columns(len(export_row))
