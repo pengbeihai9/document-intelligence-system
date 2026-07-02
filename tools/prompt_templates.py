@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 
+# 提示词工程集中放在本文件，app.py 只负责传入材料类型、语言模式和目标长度。
+# 这样后续优化摘要风格时，不需要在 Streamlit 页面逻辑里到处改字符串。
+
 def prompt_material_label(academic: bool, material_style: str) -> str:
     """把内部材料类型转换为提示词中的自然语言标签。"""
     if material_style == "presentation":
@@ -17,12 +20,13 @@ def prompt_language_contract(summary_mode: str) -> str:
     if summary_mode == "英文摘要":
         return "只输出英文，不要夹杂中文解释。"
     if summary_mode == "双语摘要":
-        return "先输出中文摘要，再另起一段输出 English Summary；中英文内容不要混在同一段。"
+        return "先输出一段中文摘要，再另起一段以 English Summary 开头输出英文摘要；中英文内容不要混在同一段。"
     return "只输出中文，不要夹杂英文段落；必要英文术语可以保留。"
 
 
 def prompt_evidence_contract(material_style: str) -> str:
     """生成证据约束，减少模型根据碎片化文本过度推断。"""
+    # 所有摘要模式共用这组事实边界，防止模型在 OCR 噪声上过度发挥。
     common_rules = [
         "所有事实、变量、指标、结论和建议必须能在原文中找到依据。",
         "原文没有给出的样本量、年份、实验数值、效果判断、适用边界和政策建议不得补写。",
@@ -68,6 +72,7 @@ def summary_output_spec(
     """根据用户选择生成摘要输出语言、长度和格式要求。"""
     cn_clause = f"目标长度：{cn_target}个汉字。" if cn_target else ""
     en_clause = f"Target length: {en_target} words." if en_target else ""
+    # PPT/图片材料通常没有完整论文结构，摘要要求必须更保守。
     if material_style in {"presentation", "visual"}:
         material_name = "PPT演示材料" if material_style == "presentation" else "图片/视觉材料"
         if summary_mode == "英文摘要":
@@ -78,13 +83,14 @@ def summary_output_spec(
             )
         if summary_mode == "双语摘要":
             return (
-                f"先输出中文{material_name}摘要，随后输出 English summary。两种语言都按主题、内容结构、关键要点、阅读提示组织；"
-                f"不要强行补写实验结论、风险或行动建议。{cn_clause} {en_clause}"
+                f"先输出一段自然连贯的中文{material_name}摘要，随后另起一段以 English Summary 开头输出英文摘要。"
+                f"不要使用小标题、列表、箭头、加号或模板化栏目；不要强行补写实验结论、风险或行动建议。{cn_clause} {en_clause}"
             )
         return (
             f"输出220-380个汉字的中文{material_name}摘要，使用材料主题、内容结构、关键要点、阅读提示四个纯文本小标题。"
             f"不要强行套用重要结论、风险或建议行动；原文没有的效果判断、实验数值和适用边界不要补充。{cn_clause}"
         )
+    # 正文类材料再区分学术写作和通用业务摘要。
     if summary_mode == "英文摘要":
         if academic:
             return (
@@ -99,11 +105,12 @@ def summary_output_spec(
     if summary_mode == "双语摘要":
         if academic:
             return (
-                "先输出一段中文顶刊/顶会风格研究摘要，约300-500个汉字；随后输出一段 English top-journal/top-conference style abstract, "
-                f"about 160-240 words. Use plain text only, no Markdown, no bullet points. {cn_clause} {en_clause}"
+                "先输出一段中文顶刊/顶会风格研究摘要，约300-500个汉字；随后另起一段以 English Summary 开头输出一段 English top-journal/top-conference style abstract, "
+                f"about 160-240 words. Use plain text only, no headings except the English Summary marker, no Markdown, no bullet points. {cn_clause} {en_clause}"
             )
         return (
-            f"先输出中文业务摘要，随后输出 English business summary。中文和英文都应覆盖核心概述、关键信息、重要结论、风险或注意事项、建议行动。{cn_clause} {en_clause}"
+            f"先输出一段自然连贯的中文摘要，随后另起一段以 English Summary 开头输出英文摘要。"
+            f"中文和英文都要覆盖材料主题、关键信息、可确认结论、风险或注意事项；不要使用核心概述、关键信息、建议行动等栏目标题。{cn_clause} {en_clause}"
         )
     if academic:
         return f"只输出一段中文顶刊/顶会风格研究摘要，300-500个汉字，不要标题、列表、Markdown或解释。{cn_clause}"
