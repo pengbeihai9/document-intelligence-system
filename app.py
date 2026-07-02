@@ -171,6 +171,7 @@ def init_storage() -> None:
                 pdca_report TEXT NOT NULL DEFAULT '',
                 extracted_text TEXT NOT NULL,
                 word_count INTEGER NOT NULL,
+                processing_seconds REAL NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
@@ -179,6 +180,8 @@ def init_storage() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
         if "pdca_report" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN pdca_report TEXT NOT NULL DEFAULT ''")
+        if "processing_seconds" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN processing_seconds REAL NOT NULL DEFAULT 0")
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -241,7 +244,7 @@ def get_or_create_demo_user() -> dict:
     return {"id": row["id"], "username": row["username"]}
 
 
-def save_document(user_id: int, filename: str, file_bytes: bytes, category: str, summary: str, pdca_report: str, extracted_text: str, word_count: int) -> None:
+def save_document(user_id: int, filename: str, file_bytes: bytes, category: str, summary: str, pdca_report: str, extracted_text: str, word_count: int, processing_seconds: float = 0.0) -> None:
     """保存用户上传的原始文件和对应的分析结果。"""
     user_dir = UPLOAD_DIR / str(user_id)
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -254,10 +257,10 @@ def save_document(user_id: int, filename: str, file_bytes: bytes, category: str,
         conn.execute(
             """
             INSERT INTO documents
-            (user_id, filename, file_path, category, summary, pdca_report, extracted_text, word_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, filename, file_path, category, summary, pdca_report, extracted_text, word_count, processing_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, filename, str(file_path), category, summary, pdca_report, extracted_text, word_count),
+            (user_id, filename, str(file_path), category, summary, pdca_report, extracted_text, word_count, float(processing_seconds or 0.0)),
         )
 
 
@@ -267,7 +270,7 @@ def list_user_documents(user_id: int) -> list[sqlite3.Row]:
         conn.row_factory = sqlite3.Row
         return conn.execute(
             """
-            SELECT id, filename, category, summary, word_count, created_at
+            SELECT id, filename, category, summary, word_count, processing_seconds, created_at
             FROM documents
             WHERE user_id = ?
             ORDER BY created_at DESC, id DESC
@@ -2540,6 +2543,21 @@ def update_progress(progress_bar, status_box, percent: int, message: str, eta_hi
     status_box.info(f"{message} ｜ 进度 {percent}%{eta_text} ｜ 正在处理，请稍候")
 
 
+def format_duration(seconds: float | int | None) -> str:
+    """把处理秒数格式化为页面上容易理解的用时。"""
+    try:
+        seconds = float(seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds <= 0:
+        return "未记录"
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    minutes = int(seconds // 60)
+    remain = int(round(seconds % 60))
+    return f"{minutes} 分 {remain} 秒"
+
+
 def safe_download_stem(filename: str) -> str:
     """生成下载文件名主干。"""
     stem = Path(filename).stem or "document"
@@ -3065,7 +3083,7 @@ with st.sidebar:
             selected_doc_id = None
         else:
             options = {
-                f"{doc['created_at']}  ·  {doc['filename']}": doc["id"]
+                f"{doc['created_at']}  ·  {format_duration(doc['processing_seconds'])}  ·  {doc['filename']}": doc["id"]
                 for doc in filtered_documents
             }
             selected_label = st.selectbox("最近文档", list(options.keys()))
@@ -3087,6 +3105,7 @@ with st.sidebar:
                     "pdca_report": doc["pdca_report"] or "该历史记录未保存PDCA检查报告。",
                     "freq_df": freq_df,
                     "extracted_text": doc["extracted_text"],
+                    "processing_seconds": float(doc["processing_seconds"] or 0),
                     "route": route,
                     "from_history": True,
                 }
@@ -3143,6 +3162,7 @@ else:
 
 # 只有当前文件尚未处理过时才执行解析，避免 Streamlit 重跑导致重复保存。
 if uploaded_file is not None and st.session_state.processed_upload != upload_signature:
+    processing_started_at = time.perf_counter()
     file_bytes = uploaded_file.getvalue()
     st.session_state.upload_error = None
     progress_bar = st.progress(0)
@@ -3212,6 +3232,7 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
             st.session_state.get("quality_mode", "快速"),
         )
         category = resolve_user_category(category)
+    processing_seconds = time.perf_counter() - processing_started_at
     update_progress(progress_bar, status_box, 88, "摘要生成完成，正在保存记录", eta_hint)
     # 分析结果和原始文件一起保存到当前用户目录，保证历史记录可追溯。
     save_document(
@@ -3223,6 +3244,7 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
         pdca_report=pdca_report,
         extracted_text=extracted_text,
         word_count=len(freq_df),
+        processing_seconds=processing_seconds,
     )
     st.session_state.last_result = {
         "filename": uploaded_file.name,
@@ -3233,13 +3255,14 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
         "pdca_report": pdca_report,
         "freq_df": freq_df,
         "extracted_text": extracted_text,
+        "processing_seconds": processing_seconds,
         "route": route,
         "from_history": False,
     }
     st.session_state.processed_upload = upload_signature
     st.session_state.upload_error = None
-    update_progress(progress_bar, status_box, 100, "处理完成")
-    st.success("文档已解析并保存到当前用户的历史记录。")
+    update_progress(progress_bar, status_box, 100, f"处理完成，用时 {format_duration(processing_seconds)}")
+    st.success(f"文档已解析并保存到当前用户的历史记录。本次用时 {format_duration(processing_seconds)}。")
 
 if st.session_state.last_result is None:
     st.info("请上传 PDF、Word、PPT、表格、文本或图片文件开始处理。上传记录只会显示在当前登录账号下。")
@@ -3252,7 +3275,7 @@ chinese_summary, english_summary = split_bilingual_summary(summary_text)
 summary_word_count = int(result["freq_df"]["count"].sum()) if not result["freq_df"].empty else 0
 cn_chars, cn_words = count_chinese_and_english(chinese_summary)
 en_chars, en_words = count_chinese_and_english(english_summary)
-summary_top = st.columns([3, 1, 1, 1])
+summary_top = st.columns([3, 1, 1, 1, 1])
 with summary_top[0]:
     st.subheader(f"当前文档：{result['filename']}")
 with summary_top[1]:
@@ -3261,6 +3284,8 @@ with summary_top[2]:
     st.metric("总词数", summary_word_count)
 with summary_top[3]:
     st.metric("中英摘要", f"{cn_chars}字 / {en_words}词")
+with summary_top[4]:
+    st.metric("处理用时", format_duration(result.get("processing_seconds")))
 
 with st.container(border=True):
     render_summary(summary_text, result.get("summary_source", "本地摘要"))
