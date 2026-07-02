@@ -17,7 +17,7 @@
     },
     "spreadsheet": {
       "extensions": [".xlsx", ".xls", ".csv"],
-      "label": "表格/面板数据",
+      "label": "表格/数据文件",
       "parser": "tabular_data"
     },
     "image": {
@@ -56,6 +56,11 @@
       "label": "合同/协议",
       "keywords": ["合同", "协议", "甲方", "乙方", "违约责任", "付款", "交付", "保密", "争议解决"],
       "outputs": ["条款摘要", "风险条款提示", "付款与履约节点", "责任边界识别"]
+    },
+    "invoice_finance": {
+      "label": "财务/票据",
+      "keywords": ["发票", "金额", "税率", "付款", "收款", "银行", "费用", "报销", "凭证", "invoice", "receipt"],
+      "outputs": ["金额信息提取", "票据摘要", "费用归类", "关键字段核对"]
     },
     "resume_profile": {
       "label": "简历/人才材料",

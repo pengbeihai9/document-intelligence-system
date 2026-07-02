@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -27,30 +28,35 @@ class RouteResult:
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
+    """读取文件类型和业务任务路由配置。"""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def detect_file_type(filename: str, config: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    """根据扩展名判断文件类型和解析器。"""
     config = config or load_config()
     suffix = Path(filename).suffix.lower()
     for file_type, rule in config["file_type_rules"].items():
-        if suffix in {ext.lower() for ext in rule.get("extensions", [])}:
+        extensions = {ext.lower() for ext in rule.get("extensions", [])}
+        if suffix in extensions:
             return file_type, rule
     return "unknown", {"label": "未知文件", "parser": "unsupported"}
 
 
 def normalize_text(text: str) -> str:
+    """压缩空白，便于关键词匹配。"""
     return re.sub(r"\s+", " ", text or "").strip()
 
 
 def score_task(text: str, rule: dict[str, Any]) -> int:
+    """按关键词命中次数给任务类别打分。"""
     normalized = normalize_text(text).lower()
     score = 0
     for keyword in rule.get("keywords", []):
-        keyword_lower = keyword.lower()
+        keyword_lower = str(keyword).lower()
         if not keyword_lower:
             continue
-        if re.search(r"[\u4e00-\u9fff]", keyword):
+        if re.search(r"[\u4e00-\u9fff]", keyword_lower):
             score += normalized.count(keyword_lower) * 2
         else:
             score += len(re.findall(rf"\b{re.escape(keyword_lower)}\b", normalized))
@@ -58,6 +64,7 @@ def score_task(text: str, rule: dict[str, Any]) -> int:
 
 
 def infer_task_type(text: str, config: dict[str, Any] | None = None) -> tuple[str, dict[str, int]]:
+    """根据正文关键词判断业务任务类别。"""
     config = config or load_config()
     task_rules = config["task_rules"]
     scores = {task: score_task(text, rule) for task, rule in task_rules.items()}
@@ -69,6 +76,7 @@ def infer_task_type(text: str, config: dict[str, Any] | None = None) -> tuple[st
 
 
 def route_file(filename: str, text: str = "", config: dict[str, Any] | None = None) -> RouteResult:
+    """综合文件扩展名和正文关键词，生成文件路由和任务分类结果。"""
     config = config or load_config()
     file_type, file_rule = detect_file_type(filename, config)
     task_type, scores = infer_task_type(text, config)
@@ -76,9 +84,10 @@ def route_file(filename: str, text: str = "", config: dict[str, Any] | None = No
     best_score = scores.get(task_type, 0)
     total_positive = sum(score for key, score in scores.items() if key != "general_document" and score > 0)
     confidence = 0.2 if task_type == "general_document" else min(0.95, 0.45 + best_score / max(total_positive, 1) * 0.5)
-    reason = "未命中明确业务关键词，按通用文档处理。"
-    if task_type != "general_document":
-        reason = f"命中{best_score}个与“{task_rule['label']}”相关的关键词信号。"
+    if task_type == "general_document":
+        reason = "未命中明确业务关键词，按通用文档处理。"
+    else:
+        reason = f"命中 {best_score} 个与“{task_rule['label']}”相关的关键词信号。"
     return RouteResult(
         file_type=file_type,
         file_type_label=file_rule.get("label", file_type),
@@ -93,6 +102,7 @@ def route_file(filename: str, text: str = "", config: dict[str, Any] | None = No
 
 
 def route_path(path: str | Path) -> RouteResult:
+    """命令行使用：读取可直接读取的文本文件并分类。"""
     path = Path(path)
     text = ""
     if path.suffix.lower() in {".txt", ".md", ".json", ".jsonl", ".csv"}:
@@ -105,7 +115,6 @@ def route_path(path: str | Path) -> RouteResult:
 
 def main() -> None:
     import argparse
-    import csv
 
     parser = argparse.ArgumentParser(description="Detect file type and route document task.")
     parser.add_argument("paths", nargs="+", help="Files or directories to classify.")
@@ -131,8 +140,8 @@ def main() -> None:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         fieldnames = ["path", "file_type_label", "parser", "task_label", "confidence", "reason", "recommended_outputs", "task_scores"]
-        with args.output.open("w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+        with args.output.open("w", newline="", encoding="utf-8-sig") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows({key: row.get(key, "") for key in fieldnames} for row in rows)
     else:
