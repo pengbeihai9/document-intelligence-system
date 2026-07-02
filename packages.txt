@@ -3,3 +3,4 @@ tesseract-ocr-chi-sim
 poppler-utils
 fonts-noto-cjk
 fonts-wqy-microhei
+libreoffice
