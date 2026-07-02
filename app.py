@@ -2089,7 +2089,7 @@ def build_llm_source(text: str, academic: bool, limit: int = 9000) -> str:
     return source[:limit]
 
 
-def summarize_chunks_with_llm(api_key: str, api_base: str, models: list[str], text: str, academic: bool, summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, material_style: str = "document", cn_target: int | None = None, en_target: int | None = None) -> tuple[str, str, str]:
+def summarize_chunks_with_llm(api_key: str, api_base: str, models: list[str], text: str, academic: bool, summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, material_style: str = "document", cn_target: int | None = None, en_target: int | None = None, quality_mode: str = "快速") -> tuple[str, str, str]:
     """长文摘要流程：先分块抽取事实，再合并生成最终摘要。"""
     chunks = split_text_chunks(text, chunk_size=3500, overlap=250)
     partial_summaries = []
@@ -2129,7 +2129,7 @@ def summarize_chunks_with_llm(api_key: str, api_base: str, models: list[str], te
             cn_target=cn_target,
             en_target=en_target,
         )
-        if academic and material_style == "document":
+        if quality_mode == "精修" and academic and material_style == "document":
             try:
                 summary, review_model, final_report = apply_top_venue_final_review(
                     api_key, api_base, models, combined, summary, summary_mode, cn_target, en_target
@@ -2148,7 +2148,7 @@ def summarize_chunks_with_llm(api_key: str, api_base: str, models: list[str], te
     return summary, used_model, pdca_report
 
 
-def summarize_text_with_llm(text: str, summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, material_style: str = "document", cn_target: int | None = None, en_target: int | None = None) -> tuple[str, str, str]:
+def summarize_text_with_llm(text: str, summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, material_style: str = "document", cn_target: int | None = None, en_target: int | None = None, quality_mode: str = "快速") -> tuple[str, str, str]:
     """摘要总入口：优先大模型和 PDCA，失败后回退本地摘要。"""
     api_key, api_base, models = get_llm_config()
     academic = is_academic_document(text)
@@ -2190,7 +2190,7 @@ def summarize_text_with_llm(text: str, summary_mode: str = "中文摘要", pdca_
                     cn_target=cn_target,
                     en_target=en_target,
                 )
-                if academic and material_style == "document":
+                if quality_mode == "精修" and academic and material_style == "document":
                     try:
                         summary, review_model, final_report = apply_top_venue_final_review(
                             api_key, api_base, models, source, summary, summary_mode, cn_target, en_target
@@ -2218,7 +2218,7 @@ def summarize_text_with_llm(text: str, summary_mode: str = "中文摘要", pdca_
             summary, used_model, pdca_report = summarize_chunks_with_llm(
                 api_key, api_base, models, text, academic, summary_mode,
                 pdca_cycles=pdca_cycles, pdca_pass_score=pdca_pass_score, material_style=material_style,
-                cn_target=cn_target, en_target=en_target
+                cn_target=cn_target, en_target=en_target, quality_mode=quality_mode
             )
             source_name = "智能学术分块摘要" if academic else "智能分块摘要"
             return summary, f"{source_name} + 质量复核优化", pdca_report
@@ -2336,7 +2336,7 @@ def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard") -> str:
     raise ValueError("暂不支持该文件格式")
 
 
-def analyze_text(text: str, filename: str = "", summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, cn_target: int | None = None, en_target: int | None = None) -> tuple[str, dict[str, int], str, str, str, pd.DataFrame, dict]:
+def analyze_text(text: str, filename: str = "", summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, cn_target: int | None = None, en_target: int | None = None, quality_mode: str = "快速") -> tuple[str, dict[str, int], str, str, str, pd.DataFrame, dict]:
     """对提取文本执行分类、摘要和词频统计。"""
     route = route_file(filename, text).to_dict()
     material_style = infer_material_style(filename, route.get("file_type", ""))
@@ -2350,6 +2350,7 @@ def analyze_text(text: str, filename: str = "", summary_mode: str = "中文摘�
         material_style=material_style,
         cn_target=cn_target,
         en_target=en_target,
+        quality_mode=quality_mode,
     )
     chinese_summary, english_summary = split_bilingual_summary(summary)
     if english_summary:
@@ -2703,9 +2704,15 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1.2rem;
+        padding-top: 2.6rem;
         padding-bottom: 2rem;
         max-width: 1280px;
+    }
+    h1 {
+        line-height: 1.25 !important;
+        margin-top: 0.25rem !important;
+        margin-bottom: 0.6rem !important;
+        overflow: visible !important;
     }
     .stApp {
         background: #f6f7fb;
@@ -2873,6 +2880,15 @@ with st.sidebar:
         )
         st.session_state.summary_mode = summary_mode
 
+        quality_mode = st.radio(
+            "处理速度",
+            ["快速", "精修"],
+            index=0,
+            horizontal=True,
+            help="快速模式减少大模型复核次数；精修模式会额外执行顶刊/顶会风格终审，质量更高但更慢。",
+        )
+        st.session_state.quality_mode = quality_mode
+
         category_mode = st.radio(
             "文档分类方式",
             ["自动分类", "选择标准分类", "自定义分类"],
@@ -2894,7 +2910,7 @@ with st.sidebar:
             "质量复核轮次",
             min_value=1,
             max_value=5,
-            value=3,
+            value=1 if quality_mode == "快速" else 3,
             help="轮次越多，摘要会被复核和修订更多次，但等待时间也会增加。",
         )
         pdca_pass_score = st.slider(
@@ -3021,6 +3037,7 @@ if uploaded_file is not None:
         f"{st.session_state.upload_key}:{uploaded_file.name}:{uploaded_file.size}:"
         f"{st.session_state.get('ocr_mode', 'standard')}:"
         f"{st.session_state.get('summary_mode', '中文摘要')}:"
+        f"{st.session_state.get('quality_mode', '快速')}:"
         f"{st.session_state.get('pdca_cycles', 3)}:"
         f"{st.session_state.get('pdca_pass_score', 88)}:"
         f"{st.session_state.get('category_mode', '自动分类')}:"
@@ -3098,6 +3115,7 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
             st.session_state.get("pdca_pass_score", 88),
             st.session_state.get("cn_summary_target"),
             st.session_state.get("en_summary_target"),
+            st.session_state.get("quality_mode", "快速"),
         )
         category = resolve_user_category(category)
     update_progress(progress_bar, status_box, 88, "摘要生成完成，正在保存记录", eta_hint)
