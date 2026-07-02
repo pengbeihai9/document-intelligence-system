@@ -24,6 +24,8 @@ import pytesseract
 import requests
 import streamlit as st
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt
 from pdf2image import convert_from_bytes
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from pptx import Presentation
@@ -739,6 +741,33 @@ def image_to_data_url(image: Image.Image, max_width: int = 1400) -> str:
     return f"data:image/jpeg;base64,{payload}"
 
 
+def extract_pdf_page_text(page: fitz.Page) -> str:
+    """同时尝试普通文本流和坐标块文本，选择更可读的一版。"""
+    plain_text = clean_text(page.get_text("text"))
+    try:
+        blocks = page.get_text("blocks")
+        text_blocks = []
+        for block in sorted(blocks, key=lambda item: (round(item[1] / 12), item[0])):
+            block_text = clean_text(str(block[4])) if len(block) > 4 else ""
+            if block_text:
+                text_blocks.append(block_text)
+        block_text = clean_text("\n".join(text_blocks))
+    except Exception:
+        block_text = ""
+
+    candidates = [item for item in [plain_text, block_text] if item]
+    if not candidates:
+        return ""
+
+    def candidate_score(text: str) -> float:
+        compact = re.sub(r"\s+", "", text)
+        structure_bonus = min(text.count("\n"), 30) * 0.4
+        length_bonus = min(len(compact), 2000) / 200
+        return text_readability_score(text) * 100 + structure_bonus + length_bonus
+
+    return max(candidates, key=candidate_score)
+
+
 def pdf_text_needs_vision(text: str) -> bool:
     """判断 PDF 本地文本是否明显不足，需要尝试多模态页面读取。"""
     cleaned = clean_text(text)
@@ -819,7 +848,7 @@ def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard", pdf_extract_mode:
     page_entries: list[dict] = []
     weak_entries: list[dict] = []
     for index, page in enumerate(doc, start=1):
-        page_text = clean_text(page.get_text("text"))
+        page_text = extract_pdf_page_text(page)
         weak = pdf_extract_mode == "vision" or (pdf_extract_mode == "auto" and pdf_text_needs_vision(page_text))
         entry = {"page": index, "text": page_text, "weak": weak}
         page_entries.append(entry)
@@ -2494,16 +2523,34 @@ def resolve_user_category(auto_category: str) -> str:
     return auto_category
 
 
+def build_notice_figure(message: str):
+    """生成稳定的占位图，避免词云异常时页面或导出中断。"""
+    figure, axis = plt.subplots(figsize=(11, 5))
+    axis.text(0.5, 0.5, message, ha="center", va="center", fontsize=16)
+    axis.axis("off")
+    figure.tight_layout(pad=0.2)
+    return figure
+
+
+def resolve_cjk_font_path() -> str | None:
+    """查找本机或云端常见中文字体，供词云和图片导出使用。"""
+    font_candidates = [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    return next((path for path in font_candidates if Path(path).exists()), None)
+
+
 def build_wordcloud(freq_df: pd.DataFrame, top_n: int = 40):
     """根据词频表生成中文词云图。"""
     word_col = "词语" if "词语" in freq_df.columns else "word"
     count_col = "频次" if "频次" in freq_df.columns else "count"
     filtered = freq_df.copy()
     if filtered.empty or word_col not in filtered.columns or count_col not in filtered.columns:
-        figure, axis = plt.subplots(figsize=(11, 5))
-        axis.text(0.5, 0.5, "暂无足够词频生成词云", ha="center", va="center", fontsize=16)
-        axis.axis("off")
-        return figure
+        return build_notice_figure("暂无足够词频生成词云")
     filtered[word_col] = filtered[word_col].astype(str).str.strip()
     filtered = filtered[filtered[word_col].astype(bool)]
     filtered = filtered[~filtered[word_col].isin(STOPWORDS)]
@@ -2515,28 +2562,21 @@ def build_wordcloud(freq_df: pd.DataFrame, top_n: int = 40):
     filtered = filtered.sort_values(count_col, ascending=False).head(top_n)
     frequencies = dict(zip(filtered[word_col], filtered[count_col]))
     if not frequencies:
-        figure, axis = plt.subplots(figsize=(11, 5))
-        axis.text(0.5, 0.5, "暂无足够词频生成词云", ha="center", va="center", fontsize=16)
-        axis.axis("off")
-        return figure
-    font_candidates = [
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    ]
-    font_path = next((path for path in font_candidates if Path(path).exists()), None)
-    wordcloud = WordCloud(
-        font_path=font_path,
-        width=1100,
-        height=520,
-        background_color="white",
-        max_words=top_n,
-        prefer_horizontal=0.95,
-        collocations=False,
-        margin=4,
-        random_state=42,
-    ).generate_from_frequencies(frequencies)
+        return build_notice_figure("暂无足够词频生成词云")
+    try:
+        wordcloud = WordCloud(
+            font_path=resolve_cjk_font_path(),
+            width=1100,
+            height=520,
+            background_color="white",
+            max_words=top_n,
+            prefer_horizontal=0.95,
+            collocations=False,
+            margin=4,
+            random_state=42,
+        ).generate_from_frequencies(frequencies)
+    except Exception as exc:
+        return build_notice_figure(f"词云生成失败，已保留词频柱状图\n{str(exc)[:90]}")
 
     figure, axis = plt.subplots(figsize=(11, 5))
     axis.imshow(wordcloud, interpolation="bilinear")
@@ -2727,14 +2767,63 @@ def format_extracted_text_for_reading(text: str, max_chars: int = 12000) -> str:
     return preview or "暂无可展示文本。"
 
 
+def extracted_text_quality(text: str) -> tuple[str, str, list[str]]:
+    """评估全文提取质量，给普通用户可执行的处理建议。"""
+    cleaned = clean_text(text)
+    compact = re.sub(r"\s+", "", cleaned)
+    if not compact:
+        return "低", "未提取到有效文本", ["请重新上传清晰 PDF/Word，扫描件建议选择“扫描件识别”。"]
+
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    short_ratio = sum(1 for line in lines if len(line) <= 8) / max(len(lines), 1)
+    readable_ratio = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", compact)) / max(len(compact), 1)
+    replacement_char = chr(0xFFFD)
+    noise_ratio = (
+        compact.count(replacement_char)
+        + sum(compact.count(char) for char in "□■●◆◇")
+        + mojibake_marker_count(compact)
+    ) / max(len(compact), 1)
+
+    issues = []
+    score = 100
+    if is_unreadable_text(cleaned) or noise_ratio > 0.04:
+        score -= 45
+        issues.append("疑似存在乱码或字体编码问题，建议重新导出 PDF，或上传原始 Word。")
+    if short_ratio > 0.45 and len(lines) >= 8:
+        score -= 25
+        issues.append("短行比例偏高，可能是扫描件、分栏 PDF 或逐字断行，建议尝试“多模态精读”或“扫描件识别”。")
+    if readable_ratio < 0.45:
+        score -= 20
+        issues.append("可读字符比例偏低，可能包含大量图片、公式或表格截图。")
+    if len(compact) < 500:
+        score -= 15
+        issues.append("提取文本较短，摘要可能不完整。")
+
+    if score >= 80:
+        return "较好", "文本结构基本可读", issues or ["当前提取结果可直接用于摘要，正式提交前仍建议人工复核。"]
+    if score >= 55:
+        return "一般", "可用但需要复核", issues
+    return "偏低", "提取质量可能影响摘要", issues
+
+
 def render_extracted_text(text: str) -> None:
     """展示排版后的全文预览，并保留原始文本方便复制。"""
     st.subheader("提取的全文")
     cn_count, en_count = count_chinese_and_english(text)
+    quality_label, quality_note, quality_issues = extracted_text_quality(text)
     c1, c2, c3 = st.columns(3)
     c1.metric("中文字符", cn_count)
     c2.metric("英文单词", en_count)
     c3.metric("总字符", len(text))
+    if quality_label == "较好":
+        st.success(f"提取质量：{quality_label}｜{quality_note}")
+    elif quality_label == "一般":
+        st.warning(f"提取质量：{quality_label}｜{quality_note}")
+    else:
+        st.error(f"提取质量：{quality_label}｜{quality_note}")
+    with st.expander("提取质量建议", expanded=quality_label != "较好"):
+        for issue in quality_issues:
+            st.write(f"- {issue}")
     st.markdown(format_extracted_text_for_reading(text).replace("\n", "\n\n"))
     with st.expander("查看原始文本", expanded=False):
         st.text_area("原始全文", text, height=360)
@@ -2843,90 +2932,264 @@ def safe_download_stem(filename: str) -> str:
 
 
 def build_markdown_export(result: dict) -> str:
-    """导出 Markdown 格式的分析结果。"""
+    """导出结构化 Markdown 分析报告。"""
     summary = str(result["summary"])
     chinese_summary, english_summary = split_bilingual_summary(summary)
-    summary_block = [f"## 摘要\n{chinese_summary}"]
+    cn_chars, en_words = count_chinese_and_english(summary)
+    text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
+    freq_df = result.get("freq_df")
+    freq_text = "暂无词频数据"
+    if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
+        word_col = "词语" if "词语" in freq_df.columns else "word"
+        count_col = "频次" if "频次" in freq_df.columns else "count"
+        freq_text = "、".join(f"{row[word_col]}({row[count_col]})" for _, row in freq_df.head(20).iterrows())
+    summary_block = [f"## 中文摘要\n\n{chinese_summary}"]
     if english_summary:
-        summary_block.append(f"## English Summary\n{english_summary}")
+        summary_block.append(f"## English Summary\n\n{english_summary}")
     return "\n\n".join(
         [
-            f"# {result['filename']}",
-            f"## 分类\n{result['category']}",
+            "# 文档智能分析报告",
+            f"**文件名：** {result['filename']}",
+            f"**文档分类：** {result['category']}",
+            f"**摘要统计：** 中文 {cn_chars} 字 / 英文 {en_words} 词",
+            f"**原文统计：** 中文 {text_cn_chars} 字 / 英文 {text_en_words} 词",
             *summary_block,
-            f"## 提取文本\n{result['extracted_text']}",
+            f"## 高频词\n\n{freq_text}",
+            f"## 提取文本\n\n{format_extracted_text_for_reading(str(result['extracted_text']), max_chars=30000)}",
         ]
     )
 
 
+def latex_escape(text: str) -> str:
+    """转义 LaTeX 特殊字符，避免标题、摘要或正文导致编译失败。"""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in str(text))
+
+
+def build_latex_report_source(result: dict) -> str:
+    """生成 XeLaTeX 论文式报告源码。"""
+    chinese_summary, english_summary = split_bilingual_summary(str(result["summary"]))
+    cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
+    text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
+    formatted_text = format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=30000)
+    freq_df = result.get("freq_df")
+    keywords = ""
+    if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
+        word_col = "词语" if "词语" in freq_df.columns else "word"
+        keywords = "；".join(str(row[word_col]) for _, row in freq_df.head(8).iterrows())
+    english_abstract = ""
+    if english_summary:
+        english_abstract = (
+            r"\begin{abstract}\noindent\textbf{English Summary.} "
+            + latex_escape(english_summary)
+            + r"\end{abstract}"
+        )
+    escaped_body = latex_escape(formatted_text).replace("\n\n", "\n\n\\par\n")
+    return rf"""
+\documentclass[11pt,a4paper]{{article}}
+\usepackage[margin=2.4cm]{{geometry}}
+\usepackage{{xeCJK}}
+\usepackage{{fontspec}}
+\usepackage{{setspace}}
+\usepackage{{titlesec}}
+\usepackage{{booktabs}}
+\usepackage{{longtable}}
+\usepackage{{hyperref}}
+\setmainfont{{Times New Roman}}
+\setCJKmainfont{{Microsoft YaHei}}
+\linespread{{1.18}}
+\titleformat{{\section}}{{\large\bfseries}}{{\thesection}}{{0.6em}}{{}}
+\titleformat{{\subsection}}{{\normalsize\bfseries}}{{\thesubsection}}{{0.6em}}{{}}
+\hypersetup{{colorlinks=false,pdfborder={{0 0 0}}}}
+\title{{\textbf{{文档智能分析报告}}}}
+\author{{{latex_escape(result["filename"])}}}
+\date{{}}
+\begin{{document}}
+\maketitle
+
+\begin{{abstract}}
+{latex_escape(chinese_summary)}
+\end{{abstract}}
+
+{english_abstract}
+
+\noindent\textbf{{关键词：}} {latex_escape(keywords or str(result["category"]))}
+
+\section{{基础信息}}
+\begin{{longtable}}{{p{{0.28\linewidth}}p{{0.66\linewidth}}}}
+\toprule
+文档分类 & {latex_escape(result["category"])}\\
+摘要统计 & 中文 {cn_chars} 字 / 英文 {en_words} 词\\
+原文统计 & 中文 {text_cn_chars} 字 / 英文 {text_en_words} 词\\
+\bottomrule
+\end{{longtable}}
+
+\section{{提取文本}}
+{escaped_body}
+
+\end{{document}}
+"""
+
+
+def build_latex_pdf_export(result: dict) -> bytes | None:
+    """优先用 XeLaTeX 编译论文式 PDF；环境缺失时返回 None 走兜底方案。"""
+    xelatex = shutil.which("xelatex")
+    if not xelatex:
+        return None
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        tex_path = temp_path / "report.tex"
+        pdf_path = temp_path / "report.pdf"
+        tex_path.write_text(build_latex_report_source(result), encoding="utf-8")
+        for _ in range(2):
+            completed = subprocess.run(
+                [xelatex, "-interaction=nonstopmode", "-halt-on-error", str(tex_path.name)],
+                cwd=temp_path,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+            if completed.returncode != 0:
+                return None
+        return pdf_path.read_bytes() if pdf_path.exists() else None
+
+
 def build_docx_export(result: dict) -> bytes:
-    """导出 Word 文档。"""
+    """导出排版更完整的 Word 分析报告。"""
     document = Document()
-    document.add_heading(str(result["filename"]), level=1)
-    document.add_heading("分类", level=2)
-    document.add_paragraph(str(result["category"]))
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    section.right_margin = Inches(0.9)
+
+    styles = document.styles
+    styles["Normal"].font.name = "Microsoft YaHei"
+    styles["Normal"].font.size = Pt(10.5)
+
+    title = document.add_heading("文档智能分析报告", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle = document.add_paragraph(str(result["filename"]))
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
+    text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
+    info_table = document.add_table(rows=4, cols=2)
+    info_table.style = "Table Grid"
+    info_items = [
+        ("文档分类", str(result["category"])),
+        ("中文摘要字数 / 英文摘要词数", f"{cn_chars} 字 / {en_words} 词"),
+        ("原文中文字符 / 英文单词", f"{text_cn_chars} 字 / {text_en_words} 词"),
+        ("导出说明", "摘要、分类、词频与原文均来自系统自动解析结果，建议正式提交前人工复核。"),
+    ]
+    for row, (label, value) in zip(info_table.rows, info_items):
+        row.cells[0].text = label
+        row.cells[1].text = value
+
     document.add_heading("摘要", level=2)
     chinese_summary, english_summary = split_bilingual_summary(str(result["summary"]))
-    document.add_paragraph(chinese_summary)
+    document.add_paragraph(chinese_summary).paragraph_format.first_line_indent = Inches(0.3)
     if english_summary:
         document.add_heading("English Summary", level=2)
         document.add_paragraph(english_summary)
+
+    freq_df = result.get("freq_df")
+    if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
+        document.add_heading("高频词", level=2)
+        word_col = "词语" if "词语" in freq_df.columns else "word"
+        count_col = "频次" if "频次" in freq_df.columns else "count"
+        words = [f"{row[word_col]}({row[count_col]})" for _, row in freq_df.head(20).iterrows()]
+        document.add_paragraph("、".join(words))
+
     document.add_heading("提取文本", level=2)
-    for paragraph in str(result["extracted_text"]).splitlines():
+    formatted_text = format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=30000)
+    for paragraph in formatted_text.splitlines():
         if paragraph.strip():
-            document.add_paragraph(paragraph.strip())
+            p = document.add_paragraph(paragraph.strip())
+            p.paragraph_format.first_line_indent = Inches(0.3)
+            p.paragraph_format.line_spacing = 1.25
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
 
 
 def build_pdf_export(result: dict) -> bytes:
-    """用 PyMuPDF 导出简单 PDF。"""
+    """导出论文式 PDF；优先使用 LaTeX，失败时使用 PyMuPDF 兜底。"""
+    latex_pdf = build_latex_pdf_export(result)
+    if latex_pdf:
+        return latex_pdf
+
     doc = fitz.open()
-    font_candidates = [
-        Path("C:/Windows/Fonts/msyh.ttc"),
-        Path("C:/Windows/Fonts/simhei.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-    ]
-    font_path = next((path for path in font_candidates if path.exists()), None)
+    resolved_font = resolve_cjk_font_path()
+    font_path = Path(resolved_font) if resolved_font else None
     font_name = "helv"
     if font_path:
         font_name = "custom"
 
-    content = "\n\n".join(
-        [
-            str(result["filename"]),
-            f"分类：{result['category']}",
-            "摘要：",
-            str(result["summary"]),
-            "提取文本：",
-            str(result["extracted_text"]),
-        ]
-    )
-    lines = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line:
-            lines.append("")
-            continue
-        while len(line) > 42:
-            lines.append(line[:42])
-            line = line[42:]
-        lines.append(line)
+    def wrap_text(text: str, limit: int = 42) -> list[str]:
+        wrapped = []
+        for raw_line in str(text).splitlines():
+            line = raw_line.strip()
+            if not line:
+                wrapped.append("")
+                continue
+            while len(line) > limit:
+                wrapped.append(line[:limit])
+                line = line[limit:]
+            wrapped.append(line)
+        return wrapped
+
+    cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
+    text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
+    chinese_summary, english_summary = split_bilingual_summary(str(result["summary"]))
+    sections = [
+        ("基础信息", [
+            f"文件名：{result['filename']}",
+            f"文档分类：{result['category']}",
+            f"摘要统计：中文 {cn_chars} 字 / 英文 {en_words} 词",
+            f"原文统计：中文 {text_cn_chars} 字 / 英文 {text_en_words} 词",
+        ]),
+        ("中文摘要", wrap_text(chinese_summary)),
+    ]
+    if english_summary:
+        sections.append(("English Summary", wrap_text(english_summary, limit=68)))
+    sections.append(("提取文本", wrap_text(format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=18000))))
 
     page = doc.new_page(width=595, height=842)
     if font_path:
         page.insert_font(fontname=font_name, fontfile=str(font_path))
     x, y = 50, 50
-    line_height = 16
-    for line in lines:
-        if y > 790:
+    page.insert_text((x, y), "文档智能分析报告", fontsize=18, fontname=font_name)
+    y += 34
+    for heading, body_lines in sections:
+        if y > 760:
             page = doc.new_page(width=595, height=842)
             if font_path:
                 page.insert_font(fontname=font_name, fontfile=str(font_path))
             y = 50
-        page.insert_text((x, y), line, fontsize=10.5, fontname=font_name)
-        y += line_height
+        page.insert_text((x, y), heading, fontsize=13, fontname=font_name)
+        y += 22
+        for line in body_lines:
+            if y > 790:
+                page = doc.new_page(width=595, height=842)
+                if font_path:
+                    page.insert_font(fontname=font_name, fontfile=str(font_path))
+                y = 50
+            page.insert_text((x, y), line, fontsize=10.5, fontname=font_name)
+            y += 16
+        y += 10
     data = doc.tobytes()
     doc.close()
     return data
@@ -3686,16 +3949,29 @@ with detail_tabs[1]:
     render_extracted_text(result["extracted_text"])
 
 with st.expander("下载与导出", expanded=False):
-    export_format = st.selectbox(
-        "下载内容与格式",
-        ["摘要TXT", "Markdown", "Word", "PDF", "TXT", "词频CSV", "分类得分CSV", "词云PNG", "词频柱状图HTML"],
-        index=0,
-    )
-    download_data, download_name, download_mime = build_download_payload(result, export_format)
-    st.download_button(
-        f"下载{export_format}",
-        data=download_data,
-        file_name=download_name,
-        mime=download_mime,
-    )
+    st.caption("推荐优先下载 Word 或 PDF；TXT 适合复制，CSV 和图表适合二次分析。")
+    primary_exports = [
+        ("Word", "下载 Word 报告"),
+        ("PDF", "下载论文式 PDF"),
+        ("Markdown", "下载 Markdown"),
+        ("摘要TXT", "只下载摘要"),
+    ]
+    data_exports = [
+        ("TXT", "下载原文 TXT"),
+        ("词频CSV", "下载词频表"),
+        ("分类得分CSV", "下载分类得分"),
+        ("词云PNG", "下载词云图"),
+        ("词频柱状图HTML", "下载柱状图"),
+    ]
+    for export_row in (primary_exports, data_exports):
+        columns = st.columns(len(export_row))
+        for column, (export_format, label) in zip(columns, export_row):
+            download_data, download_name, download_mime = build_download_payload(result, export_format)
+            column.download_button(
+                label,
+                data=download_data,
+                file_name=download_name,
+                mime=download_mime,
+                key=f"download_{export_format}_{safe_download_stem(result['filename'])}",
+            )
 
