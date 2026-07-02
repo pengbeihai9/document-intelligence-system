@@ -252,6 +252,35 @@ def get_or_create_demo_user() -> dict:
     return {"id": row["id"], "username": row["username"]}
 
 
+def is_demo_user(user: dict | None) -> bool:
+    """判断当前账号是否为免注册试用账号。"""
+    return bool(user and user.get("username") == "demo_user")
+
+
+def delete_demo_documents() -> None:
+    """清空免注册试用账号产生的历史记录和上传文件。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        demo = conn.execute("SELECT id FROM users WHERE username = ?", ("demo_user",)).fetchone()
+        if demo is None:
+            return
+        rows = conn.execute("SELECT file_path FROM documents WHERE user_id = ?", (demo["id"],)).fetchall()
+        conn.execute("DELETE FROM documents WHERE user_id = ?", (demo["id"],))
+    for row in rows:
+        path = Path(row["file_path"])
+        try:
+            if path.exists() and UPLOAD_DIR in path.resolve().parents:
+                path.unlink()
+        except Exception:
+            pass
+    demo_dir = UPLOAD_DIR / str(demo["id"])
+    try:
+        if demo_dir.exists() and not any(demo_dir.iterdir()):
+            demo_dir.rmdir()
+    except Exception:
+        pass
+
+
 def save_document(user_id: int, filename: str, file_bytes: bytes, category: str, summary: str, pdca_report: str, extracted_text: str, word_count: int, processing_seconds: float = 0.0) -> None:
     """保存用户上传的原始文件和对应的分析结果。"""
     user_dir = UPLOAD_DIR / str(user_id)
@@ -3669,6 +3698,7 @@ if st.session_state.user is None:
         unsafe_allow_html=True,
     )
     if st.button("免注册试用，直接进入系统", width="stretch"):
+        delete_demo_documents()
         st.session_state.user = get_or_create_demo_user()
         st.session_state.last_result = None
         st.rerun()
@@ -3712,6 +3742,8 @@ if st.session_state.user is None:
     st.stop()
 
 user = st.session_state.user
+if is_demo_user(user):
+    delete_demo_documents()
 
 # 侧边栏负责展示 OCR 状态、退出登录按钮和当前用户的历史文档。
 with st.sidebar:
@@ -4048,19 +4080,23 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
         )
         category = resolve_user_category(category)
     processing_seconds = time.perf_counter() - processing_started_at
-    update_progress(progress_bar, status_box, 88, "摘要生成完成，正在保存记录", eta_hint)
-    # 分析结果和原始文件一起保存到当前用户目录，保证历史记录可追溯。
-    save_document(
-        user_id=user["id"],
-        filename=uploaded_file.name,
-        file_bytes=file_bytes,
-        category=category,
-        summary=summary,
-        pdca_report=pdca_report,
-        extracted_text=extracted_text,
-        word_count=len(freq_df),
-        processing_seconds=processing_seconds,
-    )
+    if is_demo_user(user):
+        update_progress(progress_bar, status_box, 88, "摘要生成完成，免注册试用不保存历史记录", eta_hint)
+        delete_demo_documents()
+    else:
+        update_progress(progress_bar, status_box, 88, "摘要生成完成，正在保存记录", eta_hint)
+        # 分析结果和原始文件一起保存到当前用户目录，保证历史记录可追溯。
+        save_document(
+            user_id=user["id"],
+            filename=uploaded_file.name,
+            file_bytes=file_bytes,
+            category=category,
+            summary=summary,
+            pdca_report=pdca_report,
+            extracted_text=extracted_text,
+            word_count=len(freq_df),
+            processing_seconds=processing_seconds,
+        )
     st.session_state.last_result = {
         "filename": uploaded_file.name,
         "category": category,
@@ -4077,7 +4113,10 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
     st.session_state.processed_upload = upload_signature
     st.session_state.upload_error = None
     update_progress(progress_bar, status_box, 100, f"处理完成，用时 {format_duration(processing_seconds)}")
-    st.success(f"文档已解析并保存到当前用户的历史记录。本次用时 {format_duration(processing_seconds)}。")
+    if is_demo_user(user):
+        st.success(f"文档已解析完成。本次为免注册试用，不保存系统历史记录；用时 {format_duration(processing_seconds)}。")
+    else:
+        st.success(f"文档已解析并保存到当前用户的历史记录。本次用时 {format_duration(processing_seconds)}。")
 
 if st.session_state.last_result is None:
     st.info("请上传 PDF、Word、PPT、表格、文本或图片文件开始处理。上传记录只会显示在当前登录账号下。")
