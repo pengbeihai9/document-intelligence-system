@@ -482,6 +482,33 @@ def join_extracted_lines(lines: list[str], source_type: str) -> str:
     return "\n".join(merged)
 
 
+def normalize_table_cell(value) -> str:
+    """规范表格单元格文本，保留空单元格占位，避免列错位。"""
+    text = clean_text("" if value is None else str(value))
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def markdown_table_from_rows(rows: list[list], max_rows: int | None = None) -> str:
+    """把二维数组转成 Markdown 表格，便于表格在解析、摘要和导出中保持结构。"""
+    if max_rows is not None:
+        rows = rows[:max_rows]
+    normalized = [[normalize_table_cell(cell) for cell in row] for row in rows]
+    normalized = [row for row in normalized if any(cell.strip() for cell in row)]
+    if not normalized:
+        return ""
+    width = max(len(row) for row in normalized)
+    normalized = [row + [""] * (width - len(row)) for row in normalized]
+    header = normalized[0]
+    body = normalized[1:] or [[""] * width]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * width) + " |",
+    ]
+    for row in body:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
 def post_process_extracted_text(text: str, source_type: str = "document") -> str:
     """对全文提取结果做结构化清洗：去重复、修断行、保留段落。"""
     text = clean_text(text)
@@ -824,6 +851,18 @@ def image_to_data_url(image: Image.Image, max_width: int = 1400) -> str:
 def extract_pdf_page_text(page: fitz.Page) -> str:
     """同时尝试普通文本流和坐标块文本，选择更可读的一版。"""
     plain_text = clean_text(page.get_text("text"))
+    table_text = ""
+    try:
+        table_finder = page.find_tables()
+        tables = []
+        for table_index, table in enumerate(getattr(table_finder, "tables", []), start=1):
+            rows = table.extract()
+            table_markdown = markdown_table_from_rows(rows)
+            if table_markdown:
+                tables.append(f"PDF表格{table_index}：\n{table_markdown}")
+        table_text = clean_text("\n\n".join(tables))
+    except Exception:
+        table_text = ""
     try:
         blocks = page.get_text("blocks")
         text_blocks = []
@@ -837,7 +876,7 @@ def extract_pdf_page_text(page: fitz.Page) -> str:
 
     candidates = [item for item in [plain_text, block_text] if item]
     if not candidates:
-        return ""
+        return table_text
 
     def candidate_score(text: str) -> float:
         compact = re.sub(r"\s+", "", text)
@@ -845,7 +884,10 @@ def extract_pdf_page_text(page: fitz.Page) -> str:
         length_bonus = min(len(compact), 2000) / 200
         return text_readability_score(text) * 100 + structure_bonus + length_bonus
 
-    return max(candidates, key=candidate_score)
+    best_text = max(candidates, key=candidate_score)
+    if table_text and table_text not in best_text:
+        return clean_text(f"{best_text}\n\n{table_text}")
+    return best_text
 
 
 def pdf_text_needs_vision(text: str) -> bool:
@@ -874,11 +916,13 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "", pa
             "type": "text",
             "text": (
                 "请从这些PDF页面截图中提取可读正文。要求：\n"
-                "1. 按页面顺序输出，保留标题、段落、列表和表格关键信息。\n"
+                "1. 按页面顺序输出，保留标题、段落、列表、图片说明和表格关键信息。\n"
                 "2. 不要总结，不要改写，不要补充原图没有的信息。\n"
                 "3. 对数学公式、计量模型、约束条件和变量定义，尽量用 LaTeX 原样转写，例如 y_{i,t}=\\alpha+\\beta x_{i,t}+\\epsilon_{i,t}。\n"
                 "4. 公式单独成行，变量下标、上标、求和、分式、希腊字母和比较符号尽量保留；不要把公式改写成文字解释。\n"
-                "5. 识别不清的地方写[无法识别]，不要猜测。\n"
+                "5. 表格必须转写为 Markdown 表格，保留列名、行名、空单元格和数值单位；不要只概括表格。\n"
+                "6. 图片、图表或流程图请保留图题、坐标轴、图例、节点关系和图中文字；读不清的数值写[无法识别]。\n"
+                "7. 识别不清的地方写[无法识别]，不要猜测。\n"
                 f"文件名：{filename or '未命名PDF'}"
             ),
         }
@@ -899,6 +943,48 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "", pa
             ],
             "temperature": 0,
             "max_tokens": 2200,
+            "stream": True,
+        },
+        stream=True,
+        timeout=90,
+    )
+    response.raise_for_status()
+    return clean_text(parse_llm_response(response))
+
+
+def call_vision_image_extraction(image: Image.Image) -> str:
+    """用多模态模型结构化识别单张图片、图表、流程图或截图。"""
+    api_key, api_base, model = get_vision_llm_config()
+    if not api_key:
+        raise RuntimeError("未配置视觉模型 API。")
+    response = requests.post(
+        f"{api_base}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你是严谨的图片文字、图表和表格转写助手，只做结构化识别，不做摘要。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "请结构化转写这张图片中的信息：\n"
+                                "1. 提取所有可读文字，保持原顺序。\n"
+                                "2. 若有表格，转为 Markdown 表格，保留列名、行名、空单元格、数值和单位。\n"
+                                "3. 若有图表，写出图题、坐标轴、图例、系列名称、关键数值和趋势，不要凭空补数。\n"
+                                "4. 若有流程图，按节点和箭头关系列出。\n"
+                                "5. 若有公式，尽量用 LaTeX 原样转写。\n"
+                                "6. 识别不清处写[无法识别]。"
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": image_to_data_url(image)}},
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 1800,
             "stream": True,
         },
         stream=True,
@@ -994,10 +1080,10 @@ def extract_docx(file_obj) -> str:
             parts.append(paragraph.text)
 
     for table in document.tables:
-        for row in table.rows:
-            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-            if row_text:
-                parts.append(row_text)
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        table_text = markdown_table_from_rows(rows)
+        if table_text:
+            parts.append("Word表格：\n" + table_text)
 
     return clean_text("\n".join(parts))
 
@@ -1068,10 +1154,10 @@ def extract_pptx(file_obj) -> str:
             if getattr(shape, "has_text_frame", False) and shape.text.strip():
                 slide_parts.append(shape.text.strip())
             if getattr(shape, "has_table", False):
-                for row in shape.table.rows:
-                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-                    if row_text:
-                        slide_parts.append(row_text)
+                rows = [[cell.text.strip() for cell in row.cells] for row in shape.table.rows]
+                table_text = markdown_table_from_rows(rows)
+                if table_text:
+                    slide_parts.append("PPT表格：\n" + table_text)
         try:
             notes_text_frame = slide.notes_slide.notes_text_frame
             if notes_text_frame and notes_text_frame.text.strip():
@@ -1141,7 +1227,16 @@ def extract_ppt(file_bytes: bytes, filename: str) -> str:
 def extract_image(file_obj, ocr_mode: str = "standard") -> str:
     """读取图片文件并按所选 OCR 模式执行识别。"""
     image = Image.open(file_obj)
-    return clean_ocr_text(run_ocr(image, mode=ocr_mode))
+    ocr_text = clean_ocr_text(run_ocr(image, mode=ocr_mode))
+    vision_text = ""
+    if st.session_state.get("pdf_extract_mode") == "vision":
+        try:
+            vision_text = call_vision_image_extraction(image)
+        except Exception:
+            vision_text = ""
+    if vision_text:
+        return clean_text(f"图片结构化识别：\n{vision_text}\n\n图片OCR文本：\n{ocr_text}")
+    return ocr_text
 
 
 def extract_plain_text(file_bytes: bytes) -> str:
@@ -1160,7 +1255,7 @@ def extract_tabular(file_obj, suffix: str) -> str:
         df = pd.read_csv(file_obj)
     else:
         df = pd.read_excel(file_obj)
-    preview = df.head(30).to_csv(index=False)
+    preview = markdown_table_from_rows([list(df.columns), *df.head(30).astype(str).values.tolist()])
     columns = "、".join(str(col) for col in df.columns)
     return "\n".join(
         [
@@ -2897,11 +2992,16 @@ def extracted_text_quality(text: str) -> tuple[str, str, list[str]]:
     issues = []
     score = 100
     formula_line_count = sum(1 for line in lines if looks_like_formula_line(line))
+    table_line_count = sum(1 for line in lines if line.startswith("|") and line.endswith("|"))
     if is_unreadable_text(cleaned) or noise_ratio > 0.04:
         score -= 45
         issues.append("疑似存在乱码或字体编码问题，建议重新导出 PDF，或上传原始 Word。")
     if formula_line_count:
         issues.append(f"检测到 {formula_line_count} 行疑似公式或数学表达式；系统会尽量保留公式结构，复杂公式建议使用“多模态精读”或高精度 OCR 后人工复核。")
+    if table_line_count:
+        issues.append(f"检测到 {table_line_count} 行表格结构；系统已尽量按 Markdown 表格保留列和行，复杂合并单元格建议人工复核。")
+    if "图片结构化识别" in cleaned:
+        issues.append("检测到图片结构化识别结果；图表、流程图和图片文字已按可读内容转写，关键数值建议对照原图复核。")
     if short_ratio > 0.45 and len(lines) >= 8:
         score -= 25
         issues.append("短行比例偏高，可能是扫描件、分栏 PDF 或逐字断行，建议尝试“多模态精读”或“扫描件识别”。")
