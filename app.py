@@ -2713,6 +2713,33 @@ def render_summary(summary: str, summary_source: str) -> None:
     st.info(summary)
 
 
+def format_extracted_text_for_reading(text: str, max_chars: int = 12000) -> str:
+    """把提取文本整理成适合页面阅读的段落预览。"""
+    cleaned = clean_text(text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    paragraphs = [item.strip() for item in re.split(r"\n\s*\n", cleaned) if item.strip()]
+    if len(paragraphs) <= 1:
+        sentences = split_sentences(cleaned)
+        paragraphs = ["".join(sentences[index:index + 4]) for index in range(0, len(sentences), 4)]
+    preview = "\n\n".join(paragraphs)
+    if len(preview) > max_chars:
+        preview = preview[:max_chars].rstrip() + "\n\n……后续内容已折叠，可在下方查看原始全文。"
+    return preview or "暂无可展示文本。"
+
+
+def render_extracted_text(text: str) -> None:
+    """展示排版后的全文预览，并保留原始文本方便复制。"""
+    st.subheader("提取的全文")
+    cn_count, en_count = count_chinese_and_english(text)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("中文字符", cn_count)
+    c2.metric("英文单词", en_count)
+    c3.metric("总字符", len(text))
+    st.markdown(format_extracted_text_for_reading(text).replace("\n", "\n\n"))
+    with st.expander("查看原始文本", expanded=False):
+        st.text_area("原始全文", text, height=360)
+
+
 def render_analysis(category: str, category_scores: dict[str, int], summary: str, summary_source: str, pdca_report: str, freq_df: pd.DataFrame, extracted_text: str, route: dict | None = None) -> None:
     """在 Streamlit 页面中渲染分类、摘要、词频图和全文。"""
     render_route(route)
@@ -2758,8 +2785,7 @@ def render_analysis(category: str, category_scores: dict[str, int], summary: str
             )
             st.dataframe(score_df, width="stretch")
 
-    st.subheader("提取的全文")
-    st.text_area("全文内容", extracted_text, height=360)
+    render_extracted_text(extracted_text)
 
 def estimate_processing_time(filename: str, file_size: int, ocr_mode: str, summary_mode: str) -> str:
     """按文件类型、大小和模式给用户一个保守的等待时间区间。"""
@@ -3657,8 +3683,7 @@ with detail_tabs[0]:
         except Exception as exc:
             st.write(f"词云生成失败：{exc}。柱状图仍可正常使用。")
 with detail_tabs[1]:
-    st.subheader("提取的全文")
-    st.text_area("全文内容", result["extracted_text"], height=360)
+    render_extracted_text(result["extracted_text"])
 
 with st.expander("下载与导出", expanded=False):
     export_format = st.selectbox(
