@@ -618,9 +618,21 @@ def format_academic_examples(text: str) -> str:
 
 
 def run_ocr(image: Image.Image, mode: str = "standard") -> str:
-    """优先使用 Tesseract OCR，失败时按所选模式尝试 Windows OCR 兜底。"""
+    """优先使用 Tesseract OCR，并从多种预处理和版面参数中选择最佳结果。"""
     try:
-        return clean_ocr_text(pytesseract.image_to_string(image, lang="chi_sim+eng"))
+        best_text = ""
+        best_score = 0.0
+        configs = ["--oem 1 --psm 6 -c preserve_interword_spaces=1"]
+        if mode != "fast":
+            configs.append("--oem 1 --psm 3 -c preserve_interword_spaces=1")
+        for variant in ocr_image_variants(image, mode=mode):
+            for config in configs:
+                text = clean_ocr_text(pytesseract.image_to_string(variant, lang="chi_sim+eng", config=config))
+                score = ocr_text_score(text)
+                if score > best_score:
+                    best_text = text
+                    best_score = score
+        return best_text
     except pytesseract.TesseractNotFoundError as exc:
         fallback_text = run_windows_ocr(image, mode=mode)
         if fallback_text:
@@ -707,6 +719,14 @@ def render_pdf_pages_with_fitz(file_bytes: bytes, mode: str = "standard", max_pa
     return images
 
 
+def render_pdf_page_with_fitz(doc: fitz.Document, page_index: int, mode: str = "standard") -> Image.Image:
+    """把指定 PDF 页渲染为图片，用于坏页多模态补救。"""
+    zoom = {"fast": 1.4, "standard": 1.7, "accurate": 2.2}.get(mode, 1.7)
+    page = doc[page_index]
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    return Image.open(io.BytesIO(pixmap.tobytes("png")))
+
+
 def image_to_data_url(image: Image.Image, max_width: int = 1400) -> str:
     """把页面截图压缩为 data URL，供 OpenAI 兼容多模态接口使用。"""
     image = image.convert("RGB")
@@ -732,7 +752,7 @@ def pdf_text_needs_vision(text: str) -> bool:
     return bool(lines) and len(short_lines) / max(len(lines), 1) > 0.55
 
 
-def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "") -> str:
+def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "", page_numbers: list[int] | None = None) -> str:
     """调用多模态模型从 PDF 页面截图中提取正文和表格要点。"""
     api_key, api_base, model = get_vision_llm_config()
     if not api_key:
@@ -749,8 +769,10 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "") ->
             ),
         }
     ]
+    page_numbers = page_numbers or list(range(1, len(images) + 1))
     for index, image in enumerate(images, start=1):
-        content.append({"type": "text", "text": f"第{index}页："})
+        page_number = page_numbers[index - 1] if index - 1 < len(page_numbers) else index
+        content.append({"type": "text", "text": f"第{page_number}页："})
         content.append({"type": "image_url", "image_url": {"url": image_to_data_url(image)}})
     response = requests.post(
         f"{api_base}/chat/completions",
@@ -772,26 +794,60 @@ def call_vision_pdf_extraction(images: list[Image.Image], filename: str = "") ->
     return clean_text(parse_llm_response(response))
 
 
-def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard", pdf_extract_mode: str = "auto", filename: str = "") -> str:
-    """提取 PDF 文本；必要时用 OCR 或多模态页面读取兜底。"""
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages_text = [page.get_text("text") for page in doc]
-    text = clean_text("\n".join(pages_text))
+def split_extracted_pages(text: str) -> dict[int, str]:
+    """把多模态返回的按页文本拆成 {页码: 正文}，便于替换坏页。"""
+    text = clean_text(text)
+    if not text:
+        return {}
+    matches = list(re.finditer(r"(?:^|\n)\s*第\s*(\d+)\s*页\s*[:：]?\s*", text))
+    if not matches:
+        return {1: text}
+    pages: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        page_number = int(match.group(1))
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        content = clean_text(text[start:end])
+        if content:
+            pages[page_number] = content
+    return pages
 
-    use_vision = pdf_extract_mode == "vision" or (pdf_extract_mode == "auto" and pdf_text_needs_vision(text))
-    if use_vision:
+
+def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard", pdf_extract_mode: str = "auto", filename: str = "") -> str:
+    """逐页提取 PDF：好页用文本，坏页才用多模态或 OCR 兜底。"""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    page_entries: list[dict] = []
+    weak_entries: list[dict] = []
+    for index, page in enumerate(doc, start=1):
+        page_text = clean_text(page.get_text("text"))
+        weak = pdf_extract_mode == "vision" or (pdf_extract_mode == "auto" and pdf_text_needs_vision(page_text))
+        entry = {"page": index, "text": page_text, "weak": weak}
+        page_entries.append(entry)
+        if weak:
+            weak_entries.append(entry)
+
+    if pdf_extract_mode == "text":
+        return clean_text("\n\n".join(f"第{entry['page']}页\n{entry['text']}" for entry in page_entries if entry["text"]))
+
+    max_vision_pages = int(get_secret("VISION_PDF_MAX_PAGES") or 6)
+    if weak_entries and pdf_extract_mode in {"auto", "vision"}:
+        selected = weak_entries[:max_vision_pages]
         try:
-            max_pages = int(get_secret("VISION_PDF_MAX_PAGES") or 6)
-            images = render_pdf_pages_with_fitz(file_bytes, mode="standard", max_pages=max_pages)
-            vision_text = call_vision_pdf_extraction(images, filename=filename)
-            if len(clean_text(vision_text)) >= max(160, len(text) * 0.6):
-                return vision_text
+            images = [render_pdf_page_with_fitz(doc, entry["page"] - 1, mode="standard") for entry in selected]
+            page_numbers = [entry["page"] for entry in selected]
+            vision_text = call_vision_pdf_extraction(images, filename=filename, page_numbers=page_numbers)
+            if clean_text(vision_text):
+                vision_by_page = split_extracted_pages(vision_text)
+                for entry in selected:
+                    replacement = clean_text(vision_by_page.get(entry["page"], ""))
+                    if replacement and len(replacement) >= max(30, len(entry["text"]) * 0.5):
+                        entry["text"] = replacement
         except Exception:
             if pdf_extract_mode == "vision":
                 raise
 
-    if len(text) >= 80:
-        return text
+    if any(entry["text"] and not pdf_text_needs_vision(entry["text"]) for entry in page_entries):
+        return clean_text("\n\n".join(f"第{entry['page']}页\n{entry['text']}" for entry in page_entries if entry["text"]))
 
     try:
         dpi = {"fast": 130, "standard": 170, "accurate": 220}.get(ocr_mode, 170)
@@ -807,9 +863,11 @@ def extract_pdf(file_bytes: bytes, ocr_mode: str = "standard", pdf_extract_mode:
             ) from render_exc
 
     ocr_text = []
-    for image in images:
-        ocr_text.append(run_ocr(image, mode=ocr_mode))
-    return clean_text("\n".join(ocr_text))
+    for index, image in enumerate(images, start=1):
+        page_text = run_ocr(image, mode=ocr_mode)
+        if page_text:
+            ocr_text.append(f"第{index}页\n{page_text}")
+    return clean_text("\n\n".join(ocr_text))
 
 
 def extract_docx(file_obj) -> str:
