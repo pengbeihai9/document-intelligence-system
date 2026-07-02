@@ -3010,10 +3010,20 @@ st.markdown(
     }
     div[data-testid="stFileUploaderDropzone"] small,
     div[data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p {
-        color: #4b5563 !important;
+        display: none !important;
     }
     div[data-testid="stFileUploader"] section {
         background: transparent !important;
+    }
+    .upload-hint {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 0.55rem 0.7rem;
+        margin: 0.3rem 0 0.45rem 0;
+        color: #4b5563;
+        font-size: 0.88rem;
+        line-height: 1.35;
     }
     [data-baseweb="select"] *, [data-baseweb="radio"] *, [data-baseweb="slider"] * {
         color: #111827 !important;
@@ -3374,19 +3384,15 @@ uploaded_file = st.file_uploader(
     type=["pdf", "doc", "docx", "ppt", "pptx", "csv", "xlsx", "xls", "txt", "md", "json", "jsonl", "png", "jpg", "jpeg", "bmp", "tif", "tiff"],
     key=st.session_state.upload_key,
 )
-st.caption("选择文件后会自动开始处理。支持 PDF、Word、PPT、表格、文本和常见图片格式。")
+st.markdown(
+    '<div class="upload-hint">单个文件最大 200MB；支持 PDF、Word、PPT、表格、文本和常见图片格式。选择文件后会自动开始处理。</div>',
+    unsafe_allow_html=True,
+)
 
-upload_actions = st.columns([1, 1, 2])
-with upload_actions[0]:
-    if st.button("清空本次上传"):
-        reset_upload_state(clear_result=True)
-        st.rerun()
-with upload_actions[1]:
-    if st.button("继续上传新文档"):
-        reset_upload_state(clear_result=False)
-        st.rerun()
-with upload_actions[2]:
-    st.caption("支持连续上传；历史记录会自动按当前账号保存。")
+if st.button("重新选择文件"):
+    reset_upload_state(clear_result=False)
+    st.rerun()
+st.caption("历史记录会自动按当前账号保存。")
 
 if st.session_state.upload_error:
     st.error(st.session_state.upload_error)
