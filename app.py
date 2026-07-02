@@ -2515,6 +2515,25 @@ def classify_document(text: str) -> tuple[str, dict[str, int]]:
     return best_category, scores
 
 
+def build_category_explanation(category: str, category_scores: dict[str, int], text: str = "") -> str:
+    """生成自动分类依据说明，便于页面和导出报告展示验收点。"""
+    sorted_scores = sorted(category_scores.items(), key=lambda item: item[1], reverse=True)
+    top_scores = "；".join(f"{name}={score}" for name, score in sorted_scores[:5])
+    matched_keywords = []
+    for keyword in STANDARD_CATEGORY_RULES.get(category, []):
+        if keyword and keyword in text:
+            matched_keywords.append(keyword)
+        if len(matched_keywords) >= 8:
+            break
+    if matched_keywords:
+        evidence = "命中关键词：" + "、".join(matched_keywords)
+    elif category == "通用文档":
+        evidence = "未命中明显领域关键词，归入通用文档。"
+    else:
+        evidence = "基于类别关键词累计得分最高判定。"
+    return f"系统按预设类别关键词对全文进行累计打分，得分最高类别为“{category}”。{evidence} Top得分：{top_scores}。"
+
+
 def resolve_user_category(auto_category: str) -> str:
     """根据侧边栏设置决定最终保存分类：自动、标准分类或用户自定义分类。"""
     mode = st.session_state.get("category_mode", "自动分类")
@@ -2847,7 +2866,9 @@ def render_analysis(category: str, category_scores: dict[str, int], summary: str
     with left:
         st.subheader("自动分类")
         st.success(category)
-        st.caption("分类方式：基于关键词规则打分，可按实际业务继续扩展。")
+        st.caption("分类方式：基于预设类别关键词对全文累计打分，得分最高者作为自动类别。")
+        with st.expander("查看自动分类依据", expanded=False):
+            st.write(build_category_explanation(category, category_scores, extracted_text))
 
     with right:
         st.subheader("文档信息")
@@ -2961,6 +2982,7 @@ def build_markdown_export(result: dict) -> str:
             "# 文档智能分析报告",
             f"**文件名：** {result['filename']}",
             f"**文档分类：** {result['category']}",
+            f"**自动分类依据：** {build_category_explanation(str(result['category']), result.get('category_scores', {}), str(result['extracted_text']))}",
             f"**摘要统计：** 中文 {cn_chars} 字 / 英文 {en_words} 词",
             f"**原文统计：** 中文 {text_cn_chars} 字 / 英文 {text_en_words} 词",
             *summary_block,
@@ -3117,6 +3139,13 @@ def build_latex_report_source(result: dict, temp_path: Path | None = None) -> st
             "keywords": latex_escape(keywords or str(result["category"])),
             "summary_stats": latex_escape(f"中文 {cn_chars} 字 / 英文 {en_words} 词"),
             "text_stats": latex_escape(f"中文 {text_cn_chars} 字 / 英文 {text_en_words} 词"),
+            "category_explanation": latex_paragraphs(
+                build_category_explanation(
+                    str(result["category"]),
+                    result.get("category_scores", {}),
+                    str(result["extracted_text"]),
+                )
+            ),
             "frequency_table": build_latex_frequency_table(freq_df),
             "chart_blocks": build_latex_chart_blocks(images),
             "body_text": latex_paragraphs(clean_export_body_text(str(result["extracted_text"]), max_chars=24000)),
@@ -3185,10 +3214,11 @@ def build_docx_export(result: dict) -> bytes:
 
     cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
     text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
-    info_table = document.add_table(rows=4, cols=2)
+    info_table = document.add_table(rows=5, cols=2)
     info_table.style = "Table Grid"
     info_items = [
         ("文档分类", str(result["category"])),
+        ("自动分类依据", build_category_explanation(str(result["category"]), result.get("category_scores", {}), str(result["extracted_text"]))),
         ("中文摘要字数 / 英文摘要词数", f"{cn_chars} 字 / {en_words} 词"),
         ("原文中文字符 / 英文单词", f"{text_cn_chars} 字 / {text_en_words} 词"),
         ("导出说明", "摘要、分类、词频与原文均来自系统自动解析结果，建议正式提交前人工复核。"),
@@ -4071,6 +4101,9 @@ with summary_top[3]:
     st.metric("中英摘要", f"{cn_chars}字 / {en_words}词")
 with summary_top[4]:
     st.metric("处理用时", format_duration(result.get("processing_seconds")))
+
+with st.expander("自动分类依据", expanded=False):
+    st.write(build_category_explanation(str(result["category"]), result["category_scores"], str(result["extracted_text"])))
 
 with st.container(border=True):
     render_summary(summary_text, result.get("summary_source", "本地摘要"))
