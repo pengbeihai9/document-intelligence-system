@@ -1,0 +1,63 @@
+\documentclass[UTF8,zihao=-4,a4paper]{ctexart}
+\usepackage[margin=2.45cm,headheight=16pt]{geometry}
+\usepackage{fontspec}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{indentfirst}
+\usepackage{hyperref}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
+\IfFontExistsTF{Noto Serif CJK SC}{\setCJKmainfont{Noto Serif CJK SC}}{\setCJKmainfont{SimSun}}
+\IfFontExistsTF{Noto Sans CJK SC}{\setCJKsansfont{Noto Sans CJK SC}}{\setCJKsansfont{SimHei}}
+\hypersetup{colorlinks=false,pdfborder={0 0 0}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{文档智能分析报告}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\onehalfspacing
+\titleformat{\section}{\sffamily\bfseries\zihao{4}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\sffamily\bfseries\normalsize}{\thesubsection}{0.8em}{}
+\title{\sffamily\bfseries\zihao{2} 文档智能分析报告}
+\author{{{ filename }}}
+\date{}
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent {{ chinese_summary }}
+\end{abstract}
+
+{{ english_summary_block }}
+
+\noindent\textbf{关键词：} {{ keywords }}
+
+\section{基础信息}
+\begin{center}
+\begin{tabular}{p{0.24\linewidth}p{0.62\linewidth}}
+\toprule
+文件名 & {{ filename }}\\
+文档分类 & {{ category }}\\
+摘要统计 & {{ summary_stats }}\\
+原文统计 & {{ text_stats }}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{词频分析}
+{{ frequency_table }}
+
+{{ chart_blocks }}
+
+\section{正文预览}
+{{ body_text }}
+
+\end{document}

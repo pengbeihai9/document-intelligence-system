@@ -25,7 +25,10 @@ import requests
 import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+from matplotlib import font_manager
 from pdf2image import convert_from_bytes
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from pptx import Presentation
@@ -55,6 +58,7 @@ DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "app.db"
 ACADEMIC_EXAMPLES_PATH = BASE_DIR / "academic_abstract_examples.jsonl"
+REPORT_TEMPLATE_PATH = BASE_DIR / "templates" / "report_template.tex"
 
 # 标准分类标签集中放在这里，侧边栏手动分类和历史筛选都复用同一套类别。
 STANDARD_CATEGORY_RULES = {
@@ -2983,69 +2987,141 @@ def latex_escape(text: str) -> str:
     return "".join(replacements.get(char, char) for char in str(text))
 
 
-def build_latex_report_source(result: dict) -> str:
-    """生成 XeLaTeX 论文式报告源码。"""
+def clean_export_body_text(text: str, max_chars: int = 24000) -> str:
+    """生成正式报告正文预览，去掉解析页码和过多技术痕迹。"""
+    text = format_extracted_text_for_reading(text, max_chars=max_chars)
+    lines = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            lines.append("")
+            continue
+        if re.fullmatch(r"(第\s*\d+\s*页|Page\s*\d+|Slide\s*\d+)\s*[:：]?", cleaned, re.IGNORECASE):
+            continue
+        cleaned = re.sub(r"^(第\s*\d+\s*页|Page\s*\d+|Slide\s*\d+)\s*[:：]?\s*", "", cleaned, flags=re.IGNORECASE)
+        if cleaned:
+            lines.append(cleaned)
+    return clean_text("\n".join(lines))
+
+
+def latex_paragraphs(text: str) -> str:
+    """把普通文本转成 LaTeX 段落。"""
+    paragraphs = [latex_escape(item.strip()) for item in re.split(r"\n\s*\n", clean_text(text)) if item.strip()]
+    return "\n\n\\par\n".join(paragraphs) or "暂无可展示正文。"
+
+
+def render_latex_template(context: dict[str, str]) -> str:
+    """用简单占位符渲染项目内置 LaTeX 模板。"""
+    template = REPORT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    for key, value in context.items():
+        template = template.replace("{{ " + key + " }}", value)
+    return template
+
+
+def build_latex_frequency_table(freq_df: pd.DataFrame, top_n: int = 15) -> str:
+    """生成适合 LaTeX 报告的高频词表。"""
+    if not isinstance(freq_df, pd.DataFrame) or freq_df.empty:
+        return "暂无可展示词频数据。"
+    word_col = "词语" if "词语" in freq_df.columns else "word"
+    count_col = "频次" if "频次" in freq_df.columns else "count"
+    rows = []
+    for _, row in freq_df.head(top_n).iterrows():
+        rows.append(f"{latex_escape(row[word_col])} & {latex_escape(row[count_col])}\\\\")
+    return "\n".join([
+        r"\begin{center}",
+        r"\begin{tabular}{p{0.5\linewidth}r}",
+        r"\toprule",
+        r"词语 & 频次\\",
+        r"\midrule",
+        *rows,
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{center}",
+    ])
+
+
+def save_report_images(result: dict, temp_path: Path) -> list[tuple[str, Path]]:
+    """生成报告中使用的系统分析图，不尝试复刻原文复杂图表。"""
+    freq_df = result.get("freq_df")
+    if not isinstance(freq_df, pd.DataFrame) or freq_df.empty:
+        return []
+
+    images: list[tuple[str, Path]] = []
+    word_col = "词语" if "词语" in freq_df.columns else "word"
+    count_col = "频次" if "频次" in freq_df.columns else "count"
+    chart_df = freq_df.sort_values(count_col, ascending=False).head(12)
+    font_prop = font_manager.FontProperties(fname=resolve_cjk_font_path()) if resolve_cjk_font_path() else None
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.2), facecolor="white")
+    ax.barh(chart_df[word_col].astype(str)[::-1], chart_df[count_col][::-1], color="#2563eb")
+    ax.set_xlabel("频次", fontproperties=font_prop)
+    ax.set_title("高频词柱状图", fontproperties=font_prop)
+    if font_prop:
+        for label in ax.get_yticklabels() + ax.get_xticklabels():
+            label.set_fontproperties(font_prop)
+    ax.grid(axis="x", alpha=0.18)
+    fig.tight_layout()
+    bar_path = temp_path / "freq_bar.png"
+    fig.savefig(bar_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    images.append(("高频词柱状图", bar_path))
+
+    cloud_path = temp_path / "wordcloud.png"
+    cloud_bytes = figure_to_png_bytes(build_wordcloud(freq_df, top_n=45))
+    cloud_path.write_bytes(cloud_bytes)
+    images.append(("高频词词云图", cloud_path))
+    return images
+
+
+def build_latex_chart_blocks(images: list[tuple[str, Path]]) -> str:
+    """生成 LaTeX 图片块。"""
+    blocks = []
+    for title, image_path in images:
+        blocks.append(
+            "\n".join([
+                r"\begin{figure}[H]",
+                r"\centering",
+                rf"\includegraphics[width=0.92\linewidth]{{{image_path.name}}}",
+                rf"\caption{{{latex_escape(title)}}}",
+                r"\end{figure}",
+            ])
+        )
+    return "\n\n".join(blocks)
+
+
+def build_latex_report_source(result: dict, temp_path: Path | None = None) -> str:
+    """按项目内置 LaTeX 模板生成报告源码。"""
     chinese_summary, english_summary = split_bilingual_summary(str(result["summary"]))
     cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
     text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
-    formatted_text = format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=30000)
     freq_df = result.get("freq_df")
     keywords = ""
     if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
         word_col = "词语" if "词语" in freq_df.columns else "word"
         keywords = "；".join(str(row[word_col]) for _, row in freq_df.head(8).iterrows())
-    english_abstract = ""
+    english_summary_block = ""
     if english_summary:
-        english_abstract = (
-            r"\begin{abstract}\noindent\textbf{English Summary.} "
-            + latex_escape(english_summary)
+        english_summary_block = (
+            r"\begin{abstract}" + "\n"
+            + r"\noindent\textbf{English Summary.} "
+            + latex_escape(english_summary) + "\n"
             + r"\end{abstract}"
         )
-    escaped_body = latex_escape(formatted_text).replace("\n\n", "\n\n\\par\n")
-    return rf"""
-\documentclass[11pt,a4paper]{{article}}
-\usepackage[margin=2.4cm]{{geometry}}
-\usepackage{{xeCJK}}
-\usepackage{{fontspec}}
-\usepackage{{setspace}}
-\usepackage{{titlesec}}
-\usepackage{{booktabs}}
-\usepackage{{longtable}}
-\usepackage{{hyperref}}
-\setmainfont{{Times New Roman}}
-\setCJKmainfont{{Microsoft YaHei}}
-\linespread{{1.18}}
-\titleformat{{\section}}{{\large\bfseries}}{{\thesection}}{{0.6em}}{{}}
-\titleformat{{\subsection}}{{\normalsize\bfseries}}{{\thesubsection}}{{0.6em}}{{}}
-\hypersetup{{colorlinks=false,pdfborder={{0 0 0}}}}
-\title{{\textbf{{文档智能分析报告}}}}
-\author{{{latex_escape(result["filename"])}}}
-\date{{}}
-\begin{{document}}
-\maketitle
-
-\begin{{abstract}}
-{latex_escape(chinese_summary)}
-\end{{abstract}}
-
-{english_abstract}
-
-\noindent\textbf{{关键词：}} {latex_escape(keywords or str(result["category"]))}
-
-\section{{基础信息}}
-\begin{{longtable}}{{p{{0.28\linewidth}}p{{0.66\linewidth}}}}
-\toprule
-文档分类 & {latex_escape(result["category"])}\\
-摘要统计 & 中文 {cn_chars} 字 / 英文 {en_words} 词\\
-原文统计 & 中文 {text_cn_chars} 字 / 英文 {text_en_words} 词\\
-\bottomrule
-\end{{longtable}}
-
-\section{{提取文本}}
-{escaped_body}
-
-\end{{document}}
-"""
+    images = save_report_images(result, temp_path) if temp_path is not None else []
+    return render_latex_template(
+        {
+            "filename": latex_escape(result["filename"]),
+            "category": latex_escape(result["category"]),
+            "chinese_summary": latex_escape(chinese_summary),
+            "english_summary_block": english_summary_block,
+            "keywords": latex_escape(keywords or str(result["category"])),
+            "summary_stats": latex_escape(f"中文 {cn_chars} 字 / 英文 {en_words} 词"),
+            "text_stats": latex_escape(f"中文 {text_cn_chars} 字 / 英文 {text_en_words} 词"),
+            "frequency_table": build_latex_frequency_table(freq_df),
+            "chart_blocks": build_latex_chart_blocks(images),
+            "body_text": latex_paragraphs(clean_export_body_text(str(result["extracted_text"]), max_chars=24000)),
+        }
+    )
 
 
 def build_latex_pdf_export(result: dict) -> bytes | None:
@@ -3057,7 +3133,7 @@ def build_latex_pdf_export(result: dict) -> bytes | None:
         temp_path = Path(temp_dir)
         tex_path = temp_path / "report.tex"
         pdf_path = temp_path / "report.pdf"
-        tex_path.write_text(build_latex_report_source(result), encoding="utf-8")
+        tex_path.write_text(build_latex_report_source(result, temp_path=temp_path), encoding="utf-8")
         for _ in range(2):
             completed = subprocess.run(
                 [xelatex, "-interaction=nonstopmode", "-halt-on-error", str(tex_path.name)],
@@ -3072,23 +3148,40 @@ def build_latex_pdf_export(result: dict) -> bytes | None:
         return pdf_path.read_bytes() if pdf_path.exists() else None
 
 
+def set_docx_run_font(run, font_name: str = "宋体", size: float = 10.5, bold: bool = False) -> None:
+    """设置 Word run 的中西文字体，避免中文回退成默认字体。"""
+    run.font.name = font_name
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    run.font.size = Pt(size)
+    run.bold = bold
+
+
+def set_docx_paragraph_font(paragraph, font_name: str = "宋体", size: float = 10.5, bold: bool = False) -> None:
+    """批量设置段落字体。"""
+    for run in paragraph.runs:
+        set_docx_run_font(run, font_name=font_name, size=size, bold=bold)
+
+
 def build_docx_export(result: dict) -> bytes:
     """导出排版更完整的 Word 分析报告。"""
     document = Document()
     section = document.sections[0]
-    section.top_margin = Inches(0.8)
-    section.bottom_margin = Inches(0.8)
-    section.left_margin = Inches(0.9)
-    section.right_margin = Inches(0.9)
+    section.top_margin = Inches(1.0)
+    section.bottom_margin = Inches(1.0)
+    section.left_margin = Inches(1.0)
+    section.right_margin = Inches(1.0)
 
     styles = document.styles
-    styles["Normal"].font.name = "Microsoft YaHei"
+    styles["Normal"].font.name = "宋体"
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
     styles["Normal"].font.size = Pt(10.5)
 
     title = document.add_heading("文档智能分析报告", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_docx_paragraph_font(title, font_name="黑体", size=18, bold=True)
     subtitle = document.add_paragraph(str(result["filename"]))
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_docx_paragraph_font(subtitle, font_name="宋体", size=10.5)
 
     cn_chars, en_words = count_chinese_and_english(str(result["summary"]))
     text_cn_chars, text_en_words = count_chinese_and_english(str(result["extracted_text"]))
@@ -3103,29 +3196,59 @@ def build_docx_export(result: dict) -> bytes:
     for row, (label, value) in zip(info_table.rows, info_items):
         row.cells[0].text = label
         row.cells[1].text = value
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                set_docx_paragraph_font(paragraph, font_name="宋体", size=10)
 
-    document.add_heading("摘要", level=2)
+    heading = document.add_heading("摘要", level=2)
+    set_docx_paragraph_font(heading, font_name="黑体", size=14, bold=True)
     chinese_summary, english_summary = split_bilingual_summary(str(result["summary"]))
-    document.add_paragraph(chinese_summary).paragraph_format.first_line_indent = Inches(0.3)
+    p = document.add_paragraph(chinese_summary)
+    p.paragraph_format.first_line_indent = Inches(0.32)
+    p.paragraph_format.line_spacing = 1.5
+    set_docx_paragraph_font(p, font_name="宋体", size=10.5)
     if english_summary:
-        document.add_heading("English Summary", level=2)
-        document.add_paragraph(english_summary)
+        heading = document.add_heading("English Summary", level=2)
+        set_docx_paragraph_font(heading, font_name="Times New Roman", size=14, bold=True)
+        p = document.add_paragraph(english_summary)
+        p.paragraph_format.line_spacing = 1.5
+        set_docx_paragraph_font(p, font_name="Times New Roman", size=10.5)
 
     freq_df = result.get("freq_df")
     if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
-        document.add_heading("高频词", level=2)
+        heading = document.add_heading("高频词", level=2)
+        set_docx_paragraph_font(heading, font_name="黑体", size=14, bold=True)
         word_col = "词语" if "词语" in freq_df.columns else "word"
         count_col = "频次" if "频次" in freq_df.columns else "count"
-        words = [f"{row[word_col]}({row[count_col]})" for _, row in freq_df.head(20).iterrows()]
-        document.add_paragraph("、".join(words))
+        freq_table = document.add_table(rows=1, cols=2)
+        freq_table.style = "Table Grid"
+        freq_table.rows[0].cells[0].text = "词语"
+        freq_table.rows[0].cells[1].text = "频次"
+        for _, row in freq_df.head(15).iterrows():
+            cells = freq_table.add_row().cells
+            cells[0].text = str(row[word_col])
+            cells[1].text = str(row[count_col])
+        for table_row in freq_table.rows:
+            for cell in table_row.cells:
+                for paragraph in cell.paragraphs:
+                    set_docx_paragraph_font(paragraph, font_name="宋体", size=10)
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for title_text, image_path in save_report_images(result, temp_path):
+                p = document.add_paragraph(title_text)
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                set_docx_paragraph_font(p, font_name="宋体", size=10, bold=True)
+                document.add_picture(str(image_path), width=Inches(5.9))
 
-    document.add_heading("提取文本", level=2)
-    formatted_text = format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=30000)
+    heading = document.add_heading("正文预览", level=2)
+    set_docx_paragraph_font(heading, font_name="黑体", size=14, bold=True)
+    formatted_text = clean_export_body_text(str(result["extracted_text"]), max_chars=24000)
     for paragraph in formatted_text.splitlines():
         if paragraph.strip():
             p = document.add_paragraph(paragraph.strip())
-            p.paragraph_format.first_line_indent = Inches(0.3)
-            p.paragraph_format.line_spacing = 1.25
+            p.paragraph_format.first_line_indent = Inches(0.32)
+            p.paragraph_format.line_spacing = 1.5
+            set_docx_paragraph_font(p, font_name="宋体", size=10.5)
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
@@ -3171,7 +3294,13 @@ def build_pdf_export(result: dict) -> bytes:
     ]
     if english_summary:
         sections.append(("English Summary", wrap_text(english_summary, limit=68)))
-    sections.append(("提取文本", wrap_text(format_extracted_text_for_reading(str(result["extracted_text"]), max_chars=18000))))
+    freq_df = result.get("freq_df")
+    if isinstance(freq_df, pd.DataFrame) and not freq_df.empty:
+        word_col = "词语" if "词语" in freq_df.columns else "word"
+        count_col = "频次" if "频次" in freq_df.columns else "count"
+        freq_lines = [f"{row[word_col]}：{row[count_col]}" for _, row in freq_df.head(15).iterrows()]
+        sections.append(("词频分析", freq_lines))
+    sections.append(("正文预览", wrap_text(clean_export_body_text(str(result["extracted_text"]), max_chars=18000))))
 
     page = doc.new_page(width=595, height=842)
     if font_path:
