@@ -60,17 +60,21 @@ DB_PATH = DATA_DIR / "app.db"
 ACADEMIC_EXAMPLES_PATH = BASE_DIR / "academic_abstract_examples.jsonl"
 REPORT_TEMPLATE_PATH = BASE_DIR / "templates" / "report_template.tex"
 
-# 标准分类标签集中放在这里，侧边栏手动分类和历史筛选都复用同一套类别。
+# 标准分类标签集中放在这里，侧边栏手动分类和历史筛选都复用同一套学科门类。
 STANDARD_CATEGORY_RULES = {
-    "论文/研究报告": ["摘要", "关键词", "研究", "实验", "模型", "数据", "结论", "参考文献", "abstract", "method", "results"],
-    "财务风险/违约预测": ["财务困境", "违约", "破产", "信用风险", "ST", "资产负债率", "现金流", "风险排序", "default", "bankruptcy"],
-    "年报/公告/披露文本": ["年度报告", "公告", "披露", "董事会报告", "管理层讨论", "重大事项", "经营情况", "公司治理"],
-    "实验结果/模型评估": ["accuracy", "auc", "precision", "recall", "f1", "实验结果", "消融", "基准模型", "准确率", "召回率"],
-    "合同/协议": ["合同", "协议", "甲方", "乙方", "违约", "签订", "条款", "履行", "付款", "保密"],
-    "财务/票据": ["发票", "金额", "税率", "付款", "收款", "银行", "费用", "报销", "凭证"],
-    "简历/人才材料": ["简历", "教育经历", "工作经历", "项目经验", "技能", "求职", "实习", "候选人"],
-    "通知/公文": ["通知", "公告", "会议", "决定", "要求", "单位", "日期", "请于", "安排"],
-    "通用文档": [],
+    "哲学": ["哲学", "伦理", "逻辑", "美学", "形而上学", "认识论", "价值论", "philosophy", "ethics"],
+    "经济学": ["经济", "金融", "财政", "贸易", "产业", "宏观", "微观", "计量", "风险", "违约", "破产", "economics", "finance"],
+    "法学": ["法律", "法治", "合同", "协议", "诉讼", "司法", "民法", "刑法", "行政法", "知识产权", "law", "legal"],
+    "教育学": ["教育", "教学", "课程", "学生", "教师", "学习", "课堂", "培养", "评价", "education", "learning"],
+    "文学": ["文学", "语言", "文本", "叙事", "翻译", "写作", "传播", "新闻", "修辞", "literature", "language"],
+    "历史学": ["历史", "史料", "考古", "年代", "朝代", "文化遗产", "历史演变", "history", "archaeology"],
+    "理学": ["数学", "物理", "化学", "生物", "地理", "统计", "公式", "定理", "实验", "science", "physics", "chemistry", "biology"],
+    "工学": ["工程", "算法", "模型", "系统", "网络", "计算机", "人工智能", "机器学习", "深度学习", "控制", "材料", "architecture", "transformer", "algorithm"],
+    "农学": ["农业", "作物", "种植", "土壤", "畜牧", "林业", "水产", "育种", "农产品", "agriculture"],
+    "医学": ["医学", "临床", "疾病", "患者", "诊断", "治疗", "药物", "医院", "健康", "medical", "clinical", "disease"],
+    "管理学": ["管理", "公司治理", "企业", "组织", "战略", "人力资源", "会计", "审计", "绩效", "供应链", "management", "governance"],
+    "艺术学": ["艺术", "设计", "音乐", "美术", "影视", "戏剧", "舞蹈", "视觉", "创作", "art", "design"],
+    "综合/通用材料": [],
 }
 STANDARD_CATEGORIES = list(STANDARD_CATEGORY_RULES.keys())
 
@@ -190,6 +194,18 @@ def init_storage() -> None:
             conn.execute("ALTER TABLE documents ADD COLUMN pdca_report TEXT NOT NULL DEFAULT ''")
         if "processing_seconds" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN processing_seconds REAL NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parse_cache (
+                cache_key TEXT PRIMARY KEY,
+                file_hash TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                parser_options TEXT NOT NULL,
+                extracted_text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -327,6 +343,79 @@ def get_user_document(user_id: int, document_id: int) -> sqlite3.Row | None:
             """,
             (document_id, user_id),
         ).fetchone()
+
+
+def build_parse_cache_key(file_hash: str, filename: str, ocr_mode: str, pdf_extract_mode: str) -> str:
+    """按文件内容和解析参数生成缓存键。"""
+    suffix = Path(filename).suffix.lower()
+    raw = f"{file_hash}:{suffix}:{ocr_mode}:{pdf_extract_mode}:v2"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def get_parse_cache(cache_key: str) -> str | None:
+    """读取解析缓存，避免同一文件重复 OCR 或重复调用多模态接口。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT extracted_text FROM parse_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+    return row[0] if row else None
+
+
+def save_parse_cache(cache_key: str, file_hash: str, filename: str, parser_options: str, extracted_text: str) -> None:
+    """保存解析缓存。"""
+    if not clean_text(extracted_text):
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO parse_cache
+            (cache_key, file_hash, filename, parser_options, extracted_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (cache_key, file_hash, filename, parser_options, extracted_text),
+        )
+
+
+def detect_file_kind(file_bytes: bytes, filename: str) -> str:
+    """基于文件头识别真实格式，降低扩展名错误导致的解析失败。"""
+    suffix = Path(filename).suffix.lower().lstrip(".")
+    head = file_bytes[:16]
+    if head.startswith(b"%PDF"):
+        return "pdf"
+    if head.startswith(b"PK\x03\x04"):
+        if suffix in {"docx", "pptx", "xlsx"}:
+            return suffix
+        return "zip-office"
+    if head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        if suffix in {"doc", "ppt", "xls"}:
+            return suffix
+        return "ole-office"
+    if head.startswith(b"\x89PNG"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if head.startswith(b"BM"):
+        return "bmp"
+    return suffix or "unknown"
+
+
+def validate_file_kind(file_bytes: bytes, filename: str) -> None:
+    """检查扩展名和真实文件头是否明显不一致。"""
+    suffix = Path(filename).suffix.lower().lstrip(".")
+    kind = detect_file_kind(file_bytes, filename)
+    if suffix in {"txt", "md", "json", "jsonl", "csv"}:
+        return
+    compatible = {
+        "jpg": {"jpg", "jpeg"},
+        "jpeg": {"jpg", "jpeg"},
+        "tif": {"tif", "tiff"},
+        "tiff": {"tif", "tiff"},
+        "zip-office": {"docx", "pptx", "xlsx"},
+        "ole-office": {"doc", "ppt", "xls"},
+    }
+    allowed = compatible.get(kind, {kind})
+    if suffix and suffix not in allowed:
+        raise ValueError(f"文件扩展名 .{suffix} 与真实格式 {kind} 不一致，请另存为正确格式后重新上传。")
 
 
 # ---------- 文档解析与 OCR ----------
@@ -2808,32 +2897,46 @@ def figure_to_png_bytes(figure) -> bytes:
     return buffer.getvalue()
 
 
-def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard", pdf_extract_mode: str = "auto") -> str:
+def parse_uploaded_file(uploaded_file, ocr_mode: str = "standard", pdf_extract_mode: str = "auto") -> tuple[str, bool]:
     """按文件后缀选择 PDF、Word、PPT、表格、文本或图片解析方式。"""
     suffix = uploaded_file.name.lower().rsplit(".", 1)[-1]
     file_bytes = uploaded_file.getvalue()
+    validate_file_kind(file_bytes, uploaded_file.name)
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    parser_options = json.dumps(
+        {"ocr_mode": ocr_mode, "pdf_extract_mode": pdf_extract_mode, "suffix": suffix},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cache_key = build_parse_cache_key(file_hash, uploaded_file.name, ocr_mode, pdf_extract_mode)
+    cached_text = get_parse_cache(cache_key)
+    if cached_text:
+        return cached_text, True
 
     if suffix == "pdf":
-        return post_process_extracted_text(
+        extracted = post_process_extracted_text(
             extract_pdf(file_bytes, ocr_mode=ocr_mode, pdf_extract_mode=pdf_extract_mode, filename=uploaded_file.name),
             "pdf",
         )
-    if suffix == "docx":
-        return post_process_extracted_text(extract_docx(io.BytesIO(file_bytes)), "document")
-    if suffix == "doc":
-        return post_process_extracted_text(extract_doc(file_bytes, uploaded_file.name), "document")
-    if suffix == "pptx":
-        return post_process_extracted_text(extract_pptx(io.BytesIO(file_bytes)), "ppt")
-    if suffix == "ppt":
-        return post_process_extracted_text(extract_ppt(file_bytes, uploaded_file.name), "ppt")
-    if suffix in {"csv", "xlsx", "xls"}:
-        return post_process_extracted_text(extract_tabular(io.BytesIO(file_bytes), suffix), "table")
-    if suffix in {"txt", "md", "json", "jsonl"}:
-        return post_process_extracted_text(extract_plain_text(file_bytes), "document")
-    if suffix in {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}:
-        return post_process_extracted_text(extract_image(io.BytesIO(file_bytes), ocr_mode=ocr_mode), "image")
+    elif suffix == "docx":
+        extracted = post_process_extracted_text(extract_docx(io.BytesIO(file_bytes)), "document")
+    elif suffix == "doc":
+        extracted = post_process_extracted_text(extract_doc(file_bytes, uploaded_file.name), "document")
+    elif suffix == "pptx":
+        extracted = post_process_extracted_text(extract_pptx(io.BytesIO(file_bytes)), "ppt")
+    elif suffix == "ppt":
+        extracted = post_process_extracted_text(extract_ppt(file_bytes, uploaded_file.name), "ppt")
+    elif suffix in {"csv", "xlsx", "xls"}:
+        extracted = post_process_extracted_text(extract_tabular(io.BytesIO(file_bytes), suffix), "table")
+    elif suffix in {"txt", "md", "json", "jsonl"}:
+        extracted = post_process_extracted_text(extract_plain_text(file_bytes), "document")
+    elif suffix in {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}:
+        extracted = post_process_extracted_text(extract_image(io.BytesIO(file_bytes), ocr_mode=ocr_mode), "image")
+    else:
+        raise ValueError("暂不支持该文件格式")
 
-    raise ValueError("暂不支持该文件格式")
+    save_parse_cache(cache_key, file_hash, uploaded_file.name, parser_options, extracted)
+    return extracted, False
 
 
 def analyze_text(text: str, filename: str = "", summary_mode: str = "中文摘要", pdca_cycles: int = 3, pdca_pass_score: int = 88, cn_target: int | None = None, en_target: int | None = None, quality_mode: str = "快速") -> tuple[str, dict[str, int], str, str, str, pd.DataFrame, dict]:
@@ -4143,8 +4246,9 @@ if uploaded_file is not None:
         st.rerun()
 
 if uploaded_file is not None:
+    uploaded_file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
     upload_signature = (
-        f"{st.session_state.upload_key}:{uploaded_file.name}:{uploaded_file.size}:"
+        f"{st.session_state.upload_key}:{uploaded_file.name}:{uploaded_file.size}:{uploaded_file_hash}:"
         f"{st.session_state.get('ocr_mode', 'standard')}:"
         f"{st.session_state.get('pdf_extract_mode', 'auto')}:"
         f"{st.session_state.get('summary_mode', '中文摘要')}:"
@@ -4178,12 +4282,15 @@ if uploaded_file is not None and st.session_state.processed_upload != upload_sig
         with st.spinner("正在处理文件，请稍候..."):
             # 解析阶段会根据文件类型自动选择 PDF、Word、PPT、表格文本提取或 OCR。
             update_progress(progress_bar, status_box, 18, "正在提取文本/OCR 识别", eta_hint)
-            extracted_text = parse_uploaded_file(
+            extracted_text, cache_hit = parse_uploaded_file(
                 uploaded_file,
                 ocr_mode=st.session_state.get("ocr_mode", "standard"),
                 pdf_extract_mode=st.session_state.get("pdf_extract_mode", "auto"),
             )
-            update_progress(progress_bar, status_box, 45, "文本提取完成，正在检查文本质量", eta_hint)
+            if cache_hit:
+                update_progress(progress_bar, status_box, 45, "已命中解析缓存，正在检查文本质量", eta_hint)
+            else:
+                update_progress(progress_bar, status_box, 45, "文本提取完成，正在检查文本质量", eta_hint)
     except Exception as exc:
         progress_bar.progress(100)
         st.session_state.upload_error = (
