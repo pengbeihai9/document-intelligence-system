@@ -2717,25 +2717,57 @@ st.markdown(
     .stApp {
         background: #f6f7fb;
         color: #111827;
+        color-scheme: light;
     }
     html, body, [class*="css"] {
-        color: #111827;
+        color: #111827 !important;
+        color-scheme: light;
     }
     h1, h2, h3, h4, h5, h6, p, label, span, div {
-        color: inherit;
+        color: #111827;
     }
     [data-testid="stSidebar"] {
-        background: #ffffff;
-        color: #111827;
+        background: #ffffff !important;
+        color: #111827 !important;
     }
     [data-testid="stHeader"] {
-        background: #f6f7fb;
+        background: #f6f7fb !important;
     }
-    div[data-testid="stAlert"], div[data-testid="stExpander"], div[data-testid="stDataFrame"] {
-        color: #111827;
+    div[data-testid="stAlert"], div[data-testid="stExpander"], div[data-testid="stDataFrame"],
+    div[data-testid="stForm"], div[data-testid="stFileUploader"], div[data-testid="stTabs"],
+    div[data-testid="stMarkdownContainer"] {
+        color: #111827 !important;
     }
-    textarea, input, .stTextInput input {
+    textarea, input, select, .stTextInput input, .stTextArea textarea {
         background: #ffffff !important;
+        color: #111827 !important;
+        border-color: #d1d5db !important;
+    }
+    button, button * {
+        color: #111827 !important;
+    }
+    .stButton button, .stDownloadButton button, div[data-testid="stFormSubmitButton"] button {
+        background: #ffffff !important;
+        color: #111827 !important;
+        border: 1px solid #d1d5db !important;
+    }
+    .stButton button[kind="primary"], div[data-testid="stFormSubmitButton"] button[kind="primary"] {
+        background: #2563eb !important;
+        color: #ffffff !important;
+        border-color: #2563eb !important;
+    }
+    div[data-testid="stTabs"] button, div[data-testid="stTabs"] button p {
+        color: #111827 !important;
+    }
+    div[data-testid="stFileUploaderDropzone"] {
+        background: #ffffff !important;
+        color: #111827 !important;
+        border-color: #d1d5db !important;
+    }
+    div[data-testid="stFileUploaderDropzone"] * {
+        color: #111827 !important;
+    }
+    [data-baseweb="select"] *, [data-baseweb="radio"] *, [data-baseweb="slider"] * {
         color: #111827 !important;
     }
     div[data-testid="stMetric"] {
@@ -2784,6 +2816,27 @@ st.markdown(
     .stSelectbox label, .stTextInput label, .stRadio label, .stFileUploader label {
         font-weight: 600;
     }
+    @media (max-width: 760px) {
+        .block-container {
+            padding-top: 2.1rem;
+            padding-left: 0.85rem;
+            padding-right: 0.85rem;
+        }
+        h1 {
+            font-size: 1.65rem !important;
+            line-height: 1.25 !important;
+        }
+        .feature-strip {
+            gap: 0.45rem;
+        }
+        .feature-chip {
+            flex: 1 1 100%;
+            padding: 0.5rem 0.65rem;
+        }
+        .feature-chip .value {
+            font-size: 0.9rem;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2811,6 +2864,12 @@ st.markdown(
 
 # 未登录时只显示登录和注册表单；登录成功后再进入主功能页面。
 if st.session_state.user is None:
+    st.info("老师或评阅者可直接点击“免注册试用”进入系统；也可以自行注册账号保存个人历史记录。")
+    if st.button("免注册试用", width="stretch"):
+        st.session_state.user = get_or_create_demo_user()
+        st.session_state.last_result = None
+        st.rerun()
+
     login_tab, register_tab = st.tabs(["登录", "注册"])
 
     with login_tab:
@@ -2839,6 +2898,11 @@ if st.session_state.user is None:
             else:
                 ok, message = create_user(register_username, register_password)
                 if ok:
+                    user = authenticate(register_username, register_password)
+                    if user is not None:
+                        st.session_state.user = user
+                        st.session_state.last_result = None
+                        st.rerun()
                     st.success(message)
                 else:
                     st.error(message)
