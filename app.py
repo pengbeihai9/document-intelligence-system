@@ -2733,6 +2733,36 @@ st.markdown(
     [data-testid="stHeader"] {
         background: #f6f7fb !important;
     }
+    [data-testid="stHeader"] *,
+    [data-testid="stToolbar"] *,
+    [data-testid="stDecoration"] *,
+    [data-testid="stStatusWidget"] *,
+    [data-testid="stMainMenu"] *,
+    [data-testid="stDeployButton"] *,
+    [data-testid="baseButton-header"] *,
+    [data-testid="collapsedControl"] * {
+        color: #111827 !important;
+        fill: #111827 !important;
+        stroke: #111827 !important;
+    }
+    [data-testid="stToolbar"] button,
+    [data-testid="stStatusWidget"] button,
+    [data-testid="stMainMenu"] button,
+    [data-testid="stDeployButton"] button,
+    [data-testid="baseButton-header"] {
+        background: rgba(255, 255, 255, 0.92) !important;
+        color: #111827 !important;
+        border-color: #d1d5db !important;
+    }
+    [data-testid="stToolbar"] svg,
+    [data-testid="stStatusWidget"] svg,
+    [data-testid="stMainMenu"] svg,
+    [data-testid="stDeployButton"] svg,
+    [data-testid="baseButton-header"] svg {
+        color: #111827 !important;
+        fill: #111827 !important;
+        stroke: #111827 !important;
+    }
     div[data-testid="stAlert"], div[data-testid="stExpander"], div[data-testid="stDataFrame"],
     div[data-testid="stForm"], div[data-testid="stFileUploader"], div[data-testid="stTabs"],
     div[data-testid="stMarkdownContainer"] {
